@@ -16,15 +16,15 @@ TRI_STATE_OPTIONS = (
 
 IMAGE_PRESET_OPTIONS = (
     ("none", "ui.image.preset.none"),
-    ("standard", "ui.image.preset.standard"),
-    ("bright", "ui.image.preset.enhanced"),
+    ("kcc-current-like", "ui.image.preset.standard"),
+    ("kcc-legacy-like", "ui.image.preset.enhanced"),
 )
 
 CROP_MODE_OPTIONS = (
     ("off", "ui.crop.mode.off"),
     ("smart", "ui.crop.mode.smart"),
-    ("spread-safe", "ui.crop.mode.facing.safe"),
-    ("spread-fill", "ui.crop.mode.facing.fill"),
+    ("kcc-spread", "ui.crop.mode.facing.safe"),
+    ("kcc-spread-fill", "ui.crop.mode.facing.fill"),
 )
 
 READING_DIRECTION_OPTIONS = (
@@ -75,7 +75,7 @@ class GuiState:
     page_layout: str = "facing"
     virtual_panels: str = "enabled"
     panel_movement: str = "vertical"
-    image_preset: str = "bright"
+    image_preset: str = "kcc-legacy-like"
     crop_mode: str = "off"
     target_size_text: str = ""
     scribe_panel: bool = True

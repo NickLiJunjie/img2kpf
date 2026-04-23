@@ -6,7 +6,6 @@ import sys
 from dataclasses import asdict, fields
 from pathlib import Path
 
-from ..kpf_generator import normalize_crop_mode, normalize_image_preset
 from .models import GuiState
 
 
@@ -130,8 +129,6 @@ class GuiSettingsStore:
 
     def _state_from_payload(self, filtered: dict, raw_payload: dict) -> GuiState:
         state = GuiState(**filtered)
-        state.image_preset = normalize_image_preset(state.image_preset)
-        state.crop_mode = normalize_crop_mode(state.crop_mode)
         if "panel_preset" not in raw_payload:
             state.panel_preset = "scribe_1240x1860" if state.scribe_panel else "none"
         if "shift_mode" not in raw_payload:

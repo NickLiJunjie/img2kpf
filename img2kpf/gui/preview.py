@@ -344,7 +344,7 @@ def _process_spread_group(
             template_direction,
         )
     )
-    if image_processing.crop_mode == "spread-fill":
+    if image_processing.crop_mode == "kcc-spread-fill":
         synchronized_boxes = list(
             maybe_add_inner_white_trim(
                 sources[0],

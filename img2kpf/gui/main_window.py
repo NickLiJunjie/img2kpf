@@ -986,7 +986,15 @@ class MainWindow(QMainWindow):
         self.kfx_plugin_edit.setPlaceholderText(self._txt("ui.default.kfx.output"))
         self.kfx_plugin_edit.setToolTip(self._cli_tip("kfx_plugin"))
         self.kfx_plugin_edit.setClearButtonEnabled(True)
-        layout.addWidget(self._field(self._txt("ui.kfx.plugin"), self.kfx_plugin_edit, self._cli_tip("kfx_plugin")))
+        self.kfx_plugin_browse_button = QPushButton(self._txt("ui.action.browse"))
+        self.kfx_plugin_browse_button.setToolTip(self._cli_tip("kfx_plugin"))
+        layout.addWidget(
+            self._field(
+                self._txt("ui.kfx.plugin"),
+                self._inline_row(self.kfx_plugin_edit, self.kfx_plugin_browse_button),
+                self._cli_tip("kfx_plugin"),
+            )
+        )
 
         self.jobs_spin = ScrollPassthroughSpinBox()
         self.jobs_spin.setRange(1, 64)
@@ -1859,6 +1867,7 @@ class MainWindow(QMainWindow):
         self.input_browse_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
         self.output_browse_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
         self.template_browse_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton))
+        self.kfx_plugin_browse_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton))
         self.detect_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
         self.save_profile_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
         self.load_profile_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton))
@@ -1882,6 +1891,7 @@ class MainWindow(QMainWindow):
         self.detect_button.clicked.connect(self.refresh_detection)
         self.output_browse_button.clicked.connect(self._browse_output_location)
         self.template_browse_button.clicked.connect(self._browse_template)
+        self.kfx_plugin_browse_button.clicked.connect(self._browse_kfx_plugin)
         self.clear_log_button.clicked.connect(self.log_edit.clear)
         self.open_output_button.clicked.connect(self._open_output_location)
         self.start_button.clicked.connect(self._start_run)
@@ -2629,7 +2639,9 @@ class MainWindow(QMainWindow):
             self._syncing_controls = True
             self._set_combo_value(self.shift_mode_combo, "off")
             self._syncing_controls = was_syncing
-        self.kfx_plugin_edit.setEnabled(output_format in {"kpf_kfx", "kfx_only"})
+        kfx_enabled = output_format in {"kpf_kfx", "kfx_only"}
+        self.kfx_plugin_edit.setEnabled(kfx_enabled)
+        self.kfx_plugin_browse_button.setEnabled(kfx_enabled)
         self.target_size_edit.setEnabled(panel_preset == "custom")
         self.target_size_button.setEnabled(panel_preset == "custom")
         self.shift_mode_combo.setEnabled(page_layout == "facing")
@@ -3088,6 +3100,9 @@ class MainWindow(QMainWindow):
         self.input_browse_button.setEnabled(not running)
         self.output_browse_button.setEnabled(not running)
         self.template_browse_button.setEnabled(not running)
+        self.kfx_plugin_browse_button.setEnabled(
+            not running and str(self.output_format_combo.currentData()) in {"kpf_kfx", "kfx_only"}
+        )
 
     def _browse_input_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(
@@ -3139,6 +3154,19 @@ class MainWindow(QMainWindow):
         )
         if path:
             self.template_edit.setText(path)
+
+    def _browse_kfx_plugin(self) -> None:
+        current = self.kfx_plugin_edit.text().strip()
+        current_path = Path(current) if current else None
+        initial = str(current_path if current_path and current_path.exists() else Path.home())
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            self._tr("ui.choose.kfx.plugin.file"),
+            initial,
+            "KFX Output plugin (*.zip);;All Files (*)",
+        )
+        if path:
+            self.kfx_plugin_edit.setText(path)
 
     def _open_output_location(self) -> None:
         target = self._existing_output_location()
