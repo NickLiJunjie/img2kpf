@@ -1,0 +1,17 @@
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+.venv/
+.uv-cache/
+.DS_Store
+
+# Local analysis and generated outputs
+.analysis/
+*.kpf
+*.kfx
+demo_kpf/
+demo/
+docs/research/
+
+# Optional local plugin archives
+img2kpf/plugins/kfx_output/KFX Output.zip

@@ -1,0 +1,11 @@
+# Runtime dependencies for this repository
+#
+# Current scripts require Python 3.10+.
+#
+# Keeping this file lets you run:
+#   pip install -r requirements.txt
+# with the image preprocessing dependency used by `kpf_generator.py`.
+
+Pillow>=10,<12
+lxml>=6,<7
+beautifulsoup4>=4.14,<5

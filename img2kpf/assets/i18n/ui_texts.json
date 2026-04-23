@@ -1,0 +1,361 @@
+{
+  "meta": {
+    "default_language": "zh",
+    "supported_languages": [
+      "zh",
+      "en"
+    ],
+    "note": "Key is source zh text; value is translated target text.",
+    "language_labels": {
+      "zh": "中文",
+      "en": "English"
+    }
+  },
+  "translations": {
+    "en": {
+      "自定义面板尺寸": "Custom Panel Size",
+      "输入单页画布尺寸": "Set Single-Page Canvas Size",
+      "仅在“面板尺寸”选择“自定义尺寸”时生效。": "Only applies when Panel Size is set to Custom.",
+      "宽度": "Width",
+      "高度": "Height",
+      "大图预览": "Large Preview",
+      "等待预览内容": "Waiting for preview",
+      "保持完整比例显示。": "Keep original aspect ratio.",
+      "暂无预览": "No preview",
+      "关闭": "Disabled",
+      "1 选择目录   →   2 确认模式   →   3 开始生成": "1 Choose folder   →   2 Confirm mode   →   3 Start",
+      "下一步：选择输入目录。": "Next: Choose an input folder.",
+      "等待输入": "Waiting",
+      "未选择目录": "No folder selected",
+      "输入与输出": "Input & Output",
+      "选择输入目录": "Choose input folder",
+      "选择图片目录。\n\n单卷：目录下直接是 jpg / jpeg / png 图片。\n批量：目录下是多个子目录，每个子目录里有图片。\n混合目录会报错。": "Select image folder.\n\nSingle: root contains jpg/jpeg/png images directly.\nBatch: root contains multiple subfolders, each with images.\nMixed layout is invalid.",
+      "浏览": "Browse",
+      "检测": "Detect",
+      "输入目录": "Input folder",
+      "自动推荐输出位置": "Auto suggested output",
+      "输出位置": "Output location",
+      "单卷输出 .kpf 文件；批量输出到一个目录。": "Single mode outputs a .kpf file; batch mode outputs to a directory.",
+      "可选；留空用目录名": "Optional; blank uses folder name",
+      "标题": "Title",
+      "参数设置": "Settings",
+      "常用放主要参数，高级放画质和兼容性微调。": "Common: key options. Advanced: quality and compatibility tuning.",
+      "常用": "Common",
+      "高级": "Advanced",
+      "图像预设": "Image preset",
+      "裁边模式": "Crop mode",
+      "阅读方向": "Reading direction",
+      "页面布局": "Page layout",
+      "Panel 格式": "Panel movement",
+      "选择目标设备/面板尺寸。选择“自定义尺寸”后会弹出尺寸设置窗口。": "Choose target device/panel size. 'Custom size' opens a size dialog.",
+      "面板尺寸": "Panel size",
+      "首页偏移": "First-page shift",
+      "选择生成格式。当前可用：KPF、KPF + KFX、仅 KFX。EPUB / MOBI 是预留选项，尚未接入生成逻辑。": "Choose output format. Available now: KPF, KPF + KFX, KFX only. EPUB/MOBI are placeholders and not implemented yet.",
+      "生成格式": "Output format",
+      "参数方案": "Profiles",
+      "新建": "New",
+      "把当前参数保存成一个新方案。": "Save current settings as a new profile.",
+      "加载": "Load",
+      "加载当前选中的参数方案。": "Load selected profile.",
+      "操作": "Actions",
+      "对当前选中的参数方案执行加载、覆盖、删除、默认等操作。": "Perform load/overwrite/delete/default actions for selected profile.",
+      "暂无保存的方案": "No saved profiles",
+      "选择已保存的参数方案。": "Select a saved profile.",
+      "设置…": "Set…",
+      "打开自定义尺寸弹窗。": "Open custom size dialog.",
+      "保留彩色": "Preserve color",
+      "预设": "Preset",
+      "恢复为当前 image preset 的默认 gamma。": "Reset to default gamma for current image preset.",
+      "JPEG 质量": "JPEG quality",
+      "恢复为当前 image preset 的默认 JPEG 质量。": "Reset to default JPEG quality for current image preset.",
+      "自动对比度": "Auto contrast",
+      "轻量提黑": "Light black boost",
+      "可选模板 .kpf / .zip": "Optional template .kpf / .zip",
+      "模板文件": "Template file",
+      "默认 kfx_output": "Default kfx_output",
+      "KFX 插件": "KFX plugin",
+      "并行卷数": "Parallel volumes",
+      "实时预览": "Live preview",
+      "预览固定取第 10 页；Facing 时会自动带上配对页。": "Preview always uses page 10; Facing mode automatically includes paired page.",
+      "裁边框": "Crop box",
+      "开启后显示原图，并用红色框标出当前裁边保留范围。关闭后显示裁边后的输出效果。": "On: show source image with red crop box. Off: show processed output.",
+      "大图": "Large",
+      "弹出更大的独立窗口，以完整比例查看当前预览。": "Open a larger window to view current preview at full ratio.",
+      "收起": "Collapse",
+      "收起或展开实时预览区域，给右侧其他信息留出空间。": "Collapse or expand live preview area to free space.",
+      "展开": "Expand",
+      "等待输入目录后生成预览。": "Preview appears after input folder is detected.",
+      "预览会反映当前裁边、色彩、单页/双页、RTL/LTR 与首页偏移。": "Preview reflects crop, color, single/facing, RTL/LTR and first-page shift.",
+      "当前任务": "Current task",
+      "请选择输入目录。": "Please choose an input folder.",
+      "单卷：选择放图片的目录；批量：选择包含多个分卷子目录的上层目录。": "Single: choose folder containing images. Batch: choose parent folder containing volume subfolders.",
+      "状态": "Status",
+      "等待开始": "Waiting to start",
+      "未开始": "Not started",
+      "完成后显示结果摘要。": "Result summary appears after completion.",
+      "日志": "Logs",
+      "点击“开始生成”后显示实时日志。": "Live logs appear after clicking Start.",
+      "开始生成": "Start",
+      "停止": "Stop",
+      "打开输出": "Open output",
+      "清空日志": "Clear logs",
+      "加载当前方案": "Load current profile",
+      "覆盖保存当前方案": "Overwrite with current settings",
+      "设为默认方案": "Set as default profile",
+      "取消默认方案": "Clear default profile",
+      "删除当前方案": "Delete current profile",
+      "保存参数方案": "Save profile",
+      "方案名称：": "Profile name:",
+      "名称为空": "Empty name",
+      "请输入参数方案名称。": "Please enter a profile name.",
+      "覆盖已有方案": "Overwrite existing profile",
+      "暂无方案": "No profile",
+      "请先保存一个参数方案。": "Please save a profile first.",
+      "方案不存在": "Profile not found",
+      "当前参数方案不存在，请重新选择。": "Selected profile does not exist. Please choose again.",
+      "请先选择一个参数方案。": "Please select a profile first.",
+      "覆盖参数方案": "Overwrite profile",
+      "删除参数方案": "Delete profile",
+      "未设置默认": "No default set",
+      "当前还没有默认参数方案。": "No default profile is set.",
+      "还没有保存的参数方案。": "No saved profiles yet.",
+      "尚未设置默认方案。": "No default profile selected.",
+      "先选择输入目录。": "Choose input folder first.",
+      "单卷模式：预览当前目录的第 10 页。": "Single mode: preview page 10 in current folder.",
+      "批量目录下还没有可预览的分卷。": "No previewable volume found in batch folder.",
+      "目录结构冲突，无法生成预览。": "Folder structure conflict; preview unavailable.",
+      "没有找到可预览图片。": "No previewable images found.",
+      "暂时无法生成预览。": "Preview is temporarily unavailable.",
+      "预览生成失败。": "Preview generation failed.",
+      "Single 单页布局不需要首页偏移，因此这里会自动关闭。": "Single layout does not use first-page shift; it is auto-disabled.",
+      "只有开启 Virtual Panels 后，Panel 格式才会参与生成。": "Panel movement applies only when Virtual Panels are enabled.",
+      "批量模式自动使用子目录名": "Batch mode auto-uses subfolder names",
+      "批量模式下每本书都会直接使用各自子目录名作为标题，不会自动追加统一后缀。": "In batch mode, each book uses its subfolder name directly; no common suffix is appended.",
+      "检测为单卷时填写单本输出文件；检测为批量时填写输出目录。": "In single mode use an output file; in batch mode use an output directory.",
+      "路径无效": "Invalid path",
+      "修正输入目录后继续。": "Fix input folder and continue.",
+      "当前路径不可用。": "Current path is unavailable.",
+      "请选择真实存在的目录。": "Please choose an existing folder.",
+      "单卷": "Single",
+      "确认输出文件，然后开始生成。": "Confirm output file, then start.",
+      "输出位置会自动推荐为同名文件；版式与阅读方式由上面的常用选项决定。": "Output path is auto-suggested; layout/reading options come from common settings.",
+      "批量": "Batch",
+      "确认输出目录，然后开始生成。": "Confirm output directory, then start.",
+      "目录冲突": "Folder conflict",
+      "整理目录结构后再运行。": "Fix folder structure, then run again.",
+      "根目录图片和含图片子目录同时存在，无法判断单卷或批量。": "Root images and image subfolders coexist; cannot decide single or batch mode.",
+      "无图片": "No images",
+      "换一个包含 jpg / jpeg / png 的目录。": "Choose a folder containing jpg / jpeg / png images.",
+      "没有找到可处理图片。": "No processable images found.",
+      "支持格式：jpg、jpeg、png。": "Supported formats: jpg, jpeg, png.",
+      "参数检查失败": "Validation failed",
+      "任务执行中…": "Running…",
+      "准备运行": "Preparing",
+      "后台任务即将启动。": "Background task is about to start.",
+      "==== 开始执行 ====": "==== Run started ====",
+      "==== 执行完成 ====": "==== Run completed ====",
+      "任务完成": "Completed",
+      "执行失败": "Run failed",
+      "状态：已按请求停止后续任务。": "Status: Stopped remaining tasks by request.",
+      "失败明细：": "Failure details:",
+      "选择输出目录": "Choose output directory",
+      "选择输出文件": "Choose output file",
+      "选择模板文件": "Choose template file",
+      "暂无可打开路径": "No path available",
+      "当前没有找到可打开的输出位置。": "No output location can be opened right now.",
+      "跟随面板预设": "Follow panel preset",
+      "自定义尺寸…": "Custom size…",
+      "不指定": "Not set",
+      "不偏移": "No shift",
+      "启用偏移": "Enable shift",
+      "RTL（右到左）": "RTL (Right to left)",
+      "LTR（左到右）": "LTR (Left to right)",
+      "Facing 双页": "Facing spread",
+      "Single 单页": "Single page",
+      "开启": "Enabled",
+      "Vertical 纵向": "Vertical",
+      "Horizontal 横向": "Horizontal",
+      "自动": "Auto",
+      "启用": "Enabled",
+      "禁用": "Disabled",
+      "EPUB（暂未支持）": "EPUB (Not supported yet)",
+      "MOBI（暂未支持）": "MOBI (Not supported yet)",
+      "界面语言": "Language",
+      "选择界面语言（中文 / English）。": "Choose UI language (中文 / English).",
+      "运行中": "Running",
+      "请先等待当前任务结束，再切换界面语言。": "Please wait for current task to finish before switching language.",
+      "模板文件：使用内置 RTL 双页漫画静态资产。": "Template: using built-in RTL facing static assets.",
+      "正在生成单卷 KPF": "Generating single-volume KPF",
+      "正在生成单卷临时 KPF": "Generating temporary single-volume KPF",
+      "正在继续生成 KFX": "Generating KFX",
+      "正在生成 KPF": "Generating KPF",
+      "正在生成临时 KPF": "Generating temporary KPF",
+      "正在生成 KFX": "Generating KFX",
+      "已完成": "Completed",
+      "正在处理": "Processing",
+      "处理中": "Processing",
+      "并发处理中": "Parallel processing",
+      "批量任务完成": "Batch completed",
+      "已收到停止请求，当前卷处理完成后不再继续后续卷。": "Stop requested: no more queued volumes after current one.",
+      "停止请求已生效：未继续排队新的分卷任务。": "Stop request applied: no new volume tasks were queued.",
+      "正在处理第": "Processing",
+      "开始处理：": "Started: ",
+      "处理失败：": "Failed: ",
+      "失败原因：": "Reason: ",
+      "处理完成：": "Done: ",
+      "已开始：": "Started: "
+    }
+  },
+  "patterns": {
+    "en": [
+      {
+        "pattern": "^默认方案：(.+)（当前已选）$",
+        "template": "Default profile: {0} (selected)"
+      },
+      {
+        "pattern": "^默认方案：(.+)$",
+        "template": "Default profile: {0}"
+      },
+      {
+        "pattern": "^分卷：(.+)$",
+        "template": "Volumes: {0}"
+      },
+      {
+        "pattern": "^根目录图片：(\\d+) 张；冲突子目录：(.+)$",
+        "template": "Root images: {0}; conflicting subfolders: {1}"
+      },
+      {
+        "pattern": "^模式：单卷$",
+        "template": "Mode: Single"
+      },
+      {
+        "pattern": "^模式：批量$",
+        "template": "Mode: Batch"
+      },
+      {
+        "pattern": "^成功：(\\d+)$",
+        "template": "Success: {0}"
+      },
+      {
+        "pattern": "^失败：(\\d+)$",
+        "template": "Failed: {0}"
+      },
+      {
+        "pattern": "^输出位置：(.+)$",
+        "template": "Output: {0}"
+      },
+      {
+        "pattern": "^成功条目：(.+)$",
+        "template": "Succeeded: {0}"
+      },
+      {
+        "pattern": "^其余成功条目：… 共 (\\d+) 卷$",
+        "template": "More succeeded: … total {0} volumes"
+      },
+      {
+        "pattern": "^- … 共 (\\d+) 条失败$",
+        "template": "- … total {0} failures"
+      },
+      {
+        "pattern": "^单卷任务：(\\d+) 张图片 → 1 个输出文件 · (.+)$",
+        "template": "Single task: {0} images → 1 output file · {1}"
+      },
+      {
+        "pattern": "^批量任务：(\\d+) 个分卷 → 多个输出文件 · (.+)$",
+        "template": "Batch task: {0} volumes → multiple output files · {1}"
+      },
+      {
+        "pattern": "^批量模式：预览第一卷 `(.+)` 的第 10 页。$",
+        "template": "Batch mode: preview page 10 of first volume `{0}`."
+      },
+      {
+        "pattern": "^输入目录：(.+)$",
+        "template": "Input directory: {0}"
+      },
+      {
+        "pattern": "^识别结果：(.+)$",
+        "template": "Detection: {0}"
+      },
+      {
+        "pattern": "^模板文件：(.+)$",
+        "template": "Template: {0}"
+      },
+      {
+        "pattern": "^版式配置：(.+)$",
+        "template": "Layout: {0}"
+      },
+      {
+        "pattern": "^执行失败：(.+)$",
+        "template": "Run failed: {0}"
+      },
+      {
+        "pattern": "^参数方案“(.+)”已存在，要覆盖它吗？$",
+        "template": "Profile '{0}' already exists. Overwrite it?"
+      },
+      {
+        "pattern": "^用当前参数覆盖“(.+)”吗？$",
+        "template": "Overwrite profile '{0}' with current settings?"
+      },
+      {
+        "pattern": "^删除“(.+)”吗？此操作不会影响已生成文件。$",
+        "template": "Delete profile '{0}'? Generated files are not affected."
+      },
+      {
+        "pattern": "^KPF：(.+)$",
+        "template": "KPF: {0}"
+      },
+      {
+        "pattern": "^KFX：(.+)$",
+        "template": "KFX: {0}"
+      },
+      {
+        "pattern": "^留空时自动输出到 (.+) 子目录$",
+        "template": "Blank to auto-output into `{0}` subfolder"
+      },
+      {
+        "pattern": "^单卷输出文件。留空时默认输出到输入目录下的同名子目录，例如：输入目录/目录名_(.+)/目录名(.+)$",
+        "template": "Single output file. Blank defaults to input_dir/folder_{0}/folder{1}"
+      },
+      {
+        "pattern": "^批量输出目录。留空时默认输出到输入目录下的同名子目录，例如：输入目录/目录名_(.+)$",
+        "template": "Batch output directory. Blank defaults to input_dir/folder_{0}"
+      },
+      {
+        "pattern": "^检测为单卷模式：根目录直接包含 (\\d+)张图片。$",
+        "template": "Single mode detected: root contains {0} images."
+      },
+      {
+        "pattern": "^检测为批量模式：根目录没有直接图片，以下子目录可作为分卷处理：(.+)。$",
+        "template": "Batch mode detected: root has no direct images; these subfolders are volumes: {0}."
+      },
+      {
+        "pattern": "^无法自动识别输入模式：根目录下直接有图片，同时这些子目录也包含图片：(.+)。请整理为纯单卷目录或纯批量目录后再运行。$",
+        "template": "Cannot infer mode automatically: root has images and these subfolders also have images: {0}. Please keep a pure single or pure batch structure."
+      },
+      {
+        "pattern": "^未找到可处理内容：根目录没有图片，子目录里也没有包含图片的有效卷。$",
+        "template": "No processable content found: no images in root and no valid image volumes in subfolders."
+      },
+      {
+        "pattern": "^输入目录不存在：(.+)$",
+        "template": "Input directory does not exist: {0}"
+      },
+      {
+        "pattern": "^输入路径不是目录：(.+)$",
+        "template": "Input path is not a directory: {0}"
+      },
+      {
+        "pattern": "^批量并发处理中（(\\d+) 个工作线程）$",
+        "template": "Batch parallel processing ({0} workers)"
+      },
+      {
+        "pattern": "^批量并发：(\\d+) 个工作线程$",
+        "template": "Batch parallel: {0} workers"
+      },
+      {
+        "pattern": "^正在处理第 (\\d+)/(\\d+) 卷$",
+        "template": "Processing volume {0}/{1}"
+      }
+    ]
+  }
+}

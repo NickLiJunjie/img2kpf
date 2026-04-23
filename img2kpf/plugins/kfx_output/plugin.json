@@ -1,0 +1,7 @@
+{
+  "id": "kfx_output",
+  "name": "KFX Output",
+  "kind": "zip",
+  "archive": "KFX Output.zip",
+  "description": "User-provided KFX Output plugin archive used for direct KPF -> KFX conversion inside this repository."
+}

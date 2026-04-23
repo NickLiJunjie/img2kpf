@@ -1,0 +1,63 @@
+{
+  "profile": "kc_comics_rtl_facing",
+  "template_direction": "rtl",
+  "book_state": {
+    "book_fl_type": 1,
+    "book_input_type": 4,
+    "book_reading_direction": 1,
+    "book_reading_option": 2,
+    "book_target_type": 3,
+    "book_virtual_panelmovement": 3
+  },
+  "metadata": {
+    "book_path": "resources",
+    "edited_tool_versions": [
+      "1.110.0.0"
+    ],
+    "format": "yj",
+    "global_styling": true,
+    "id": "687e7faa-b0dd-45ee-b1fa-76c130a2bea7",
+    "platform": "win",
+    "tool_name": "KC",
+    "tool_version": "1.110.0.0"
+  },
+  "tool_data": {
+    "cache_path": "resources/.cache",
+    "created_on": "2026-Apr-08 19:47:58",
+    "last_modified_time": "2026-Apr-08 19:48:35",
+    "link_extract_choice": false,
+    "link_notification_preference": true
+  },
+  "capabilities": [
+    [
+      "db.schema",
+      1
+    ]
+  ],
+  "static_fragments": [
+    {
+      "fragment_id": "$ion_symbol_table",
+      "payload_type": "blob",
+      "element_type": "$ion_symbol_table",
+      "payload_value_b64": "4AEA6u7CgYPevogiA1SGvpXek4SKWUpfc3ltYm9sc4UhCogiA0qHvp+OnXlqLmF1dGhvcmluZy5zb3VyY2VfZmlsZV9uYW1l"
+    },
+    {
+      "fragment_id": "max_id",
+      "payload_type": "blob",
+      "element_type": "max_id",
+      "payload_value_b64": "4AEA6iIDVA=="
+    },
+    {
+      "fragment_id": "content_features",
+      "payload_type": "blob",
+      "element_type": "content_features",
+      "payload_value_b64": "4AEA6u4BloIEyd4BkATWcgJJBM6+AYbewgTKjpdjb20uYW1hem9uLnlqY29udmVyc2lvbgPsjpd5al9ub25fcGRmX2ZpeGVkX2xheW91dATN2YXXBMshAgTMIN7ABMqOl2NvbS5hbWF6b24ueWpjb252ZXJzaW9uA+yOlXlqX2RvdWJsZV9wYWdlX3NwcmVhZATN2YXXBMshAQTMIA=="
+    },
+    {
+      "fragment_id": "book_navigation",
+      "payload_type": "blob",
+      "element_type": "book_navigation",
+      "payload_value_b64": "4AEA6g=="
+    }
+  ]
+}
