@@ -88,10 +88,9 @@ pip install -r requirements-gui.txt
 
 ## KFX Output download
 
-`img2kpf` does **not** bundle the KFX Output plugin archive. Download it yourself from one of these upstream sources:
+`img2kpf` does **not** bundle the KFX Output plugin archive. Download it yourself from the upstream MobileRead thread:
 
 - MobileRead thread: [KFX Output plugin](https://www.mobileread.com/forums/showthread.php?t=272407)
-- GitHub mirror: [dstaley/calibre-kfx-output](https://github.com/dstaley/calibre-kfx-output)
 
 ### Where to put the zip
 

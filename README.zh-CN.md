@@ -88,10 +88,9 @@ pip install -r requirements-gui.txt
 
 ## KFX Output 到哪里下载
 
-本仓库**不附带** `KFX Output.zip`。请从上游自行下载：
+本仓库**不附带** `KFX Output.zip`。请前往上游 MobileRead 主题帖自行下载：
 
 - MobileRead 主题帖：[KFX Output plugin](https://www.mobileread.com/forums/showthread.php?t=272407)
-- GitHub 镜像：[dstaley/calibre-kfx-output](https://github.com/dstaley/calibre-kfx-output)
 
 ### 下载后放哪里
 

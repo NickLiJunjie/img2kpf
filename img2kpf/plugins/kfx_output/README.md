@@ -14,7 +14,6 @@ You can also keep the zip anywhere else and pass its path explicitly:
 - `python kpf_generator.py --emit-kfx --kfx-plugin /path/to/KFX Output.zip ...`
 - `python kfx_direct.py --plugin /path/to/KFX Output.zip ...`
 
-Download sources:
+Download source:
 
 - MobileRead thread: [https://www.mobileread.com/forums/showthread.php?t=272407](https://www.mobileread.com/forums/showthread.php?t=272407)
-- GitHub mirror: [https://github.com/dstaley/calibre-kfx-output](https://github.com/dstaley/calibre-kfx-output)
