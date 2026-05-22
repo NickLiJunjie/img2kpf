@@ -98,7 +98,7 @@ You have two choices:
 
 1. Put the downloaded file at:
 
-   - `img2kpf/plugins/kfx_output/KFX Output.zip`
+   - `img2kpf_core/plugins/kfx_output/KFX Output.zip`
 
 2. Keep it anywhere and pass the path explicitly:
 
@@ -126,7 +126,7 @@ python kpf_generator.py \
   --output ./output/Volume_01.kpf \
   --scribe-panel \
   --emit-kfx \
-  --kfx-plugin "./img2kpf/plugins/kfx_output/KFX Output.zip"
+  --kfx-plugin "./img2kpf_core/plugins/kfx_output/KFX Output.zip"
 ```
 
 ### 3) Batch mode
@@ -144,7 +144,7 @@ python kpf_generator.py \
 ```bash
 python kfx_direct.py \
   --input ./output/Volume_01.kpf \
-  --plugin "./img2kpf/plugins/kfx_output/KFX Output.zip"
+  --plugin "./img2kpf_core/plugins/kfx_output/KFX Output.zip"
 ```
 
 ## GUI
@@ -204,10 +204,10 @@ You can still pass an external Kindle Create-exported `.kpf` / `.zip` template t
 
 ## Repository layout
 
-- `img2kpf/` — core package
-- `img2kpf/gui/` — GUI implementation
-- `img2kpf/tools/kpf_analyzer.py` — KPF structure inspection helper
-- `img2kpf/plugins/` — plugin manifests and user-provided plugin slots
+- `img2kpf_core/` — core package
+- `img2kpf_core/gui/` — GUI implementation
+- `img2kpf_core/tools/kpf_analyzer.py` — KPF structure inspection helper
+- `img2kpf_core/plugins/` — plugin manifests and user-provided plugin slots
 - `docs/parameter_guide.md` — English parameter guide
 - `docs/parameter_guide.zh-CN.md` — Chinese parameter guide
 - `THIRD_PARTY_NOTICES.md` — third-party notices and download links

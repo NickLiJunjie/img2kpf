@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+venv/
 .uv-cache/
 .DS_Store
 
@@ -15,3 +16,4 @@ docs/research/
 
 # Optional local plugin archives
 img2kpf/plugins/kfx_output/KFX Output.zip
+img2kpf_core/plugins/kfx_output/KFX Output.zip

@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail() {
+  printf 'pre-commit: %s\n' "$1" >&2
+  exit 1
+}
+
+if ! git diff --cached --check; then
+  fail "staged diff has whitespace errors; fix the lines above before committing."
+fi
+
+forbidden_paths_regex='(^|/)(\.DS_Store|KFX Output\.zip)$|(^|/)__pycache__/|\.py[co]$|^\.analysis/|^\.tmp_home/|^private_config/|^demo/|^demo_kpf/|^test_images/|^docs/research/|\.(kpf|kfx|epub|azw|azw3|mobi)$|^(\.venv|venv)/'
+forbidden_paths="$(
+  git diff --cached --name-only |
+    grep -E "$forbidden_paths_regex" || true
+)"
+if [[ -n "$forbidden_paths" ]]; then
+  printf 'pre-commit: refusing to commit local/generated/private artifacts:\n%s\n' "$forbidden_paths" >&2
+  exit 1
+fi
+
+secret_regex='(BEGIN (RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{20,})'
+secret_hits="$(
+  git grep --cached -n -I -E "$secret_regex" -- . ':(exclude).githooks/pre-commit' || true
+)"
+if [[ -n "$secret_hits" ]]; then
+  printf 'pre-commit: possible secret detected in staged content:\n%s\n' "$secret_hits" >&2
+  exit 1
+fi
+
+staged_python="$(
+  git diff --cached --name-only --diff-filter=ACMR |
+    grep -E '\.py$' || true
+)"
+if [[ -n "$staged_python" ]]; then
+  python3 -m py_compile $staged_python
+fi
+
+printf 'pre-commit: public-safety checks passed.\n'

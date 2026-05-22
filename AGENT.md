@@ -17,7 +17,7 @@
 ## 当前实现状态
 
 - 主脚本：`kpf_generator.py`
-- 默认内置静态资产：`img2kpf/assets/kc_comics_rtl_facing.json`
+- 默认内置静态资产：`img2kpf_core/assets/kc_comics_rtl_facing.json`
 - 默认运行**不再依赖外部模板**
 - `--template` 现在只是实验/兼容用的可选覆盖入口，用于逆向新 profile
 
@@ -94,18 +94,18 @@
 
 默认使用项目内隔离 calibre 配置：
 
-- `D:\code\img2kpf\.analysis\calibre_config_3`
+- `<repo>\.analysis\calibre_config`
 
 验证前先设置：
 
 ```powershell
-$env:CALIBRE_CONFIG_DIRECTORY='D:\code\img2kpf\.analysis\calibre_config_3'
+$env:CALIBRE_CONFIG_DIRECTORY='<repo>\.analysis\calibre_config'
 ```
 
 若插件未安装：
 
 ```powershell
-& 'C:\Program Files\Calibre2\calibre-customize.exe' -a 'D:\code\img2kpf\.analysis\KFX Output.zip'
+& 'C:\Program Files\Calibre2\calibre-customize.exe' -a '<repo>\.analysis\KFX Output.zip'
 ```
 
 转换命令：
@@ -127,7 +127,7 @@ $env:CALIBRE_CONFIG_DIRECTORY='D:\code\img2kpf\.analysis\calibre_config_3'
 如果 `.analysis/` 积累了大量测试产物，清理时优先保留：
 
 - `.analysis\KFX Output.zip`
-- `.analysis\calibre_config_3`
+- `.analysis\calibre_config`
 
 ## 重要提醒
 

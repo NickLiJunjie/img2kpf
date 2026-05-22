@@ -8,7 +8,7 @@ from pathlib import Path
 def main() -> int:
     _ensure_project_venv()
 
-    from img2kpf.gui.app import main as run_gui
+    from img2kpf_core.gui.app import main as run_gui
 
     return run_gui()
 
@@ -40,4 +40,3 @@ def _ensure_project_venv() -> None:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

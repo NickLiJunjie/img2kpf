@@ -98,7 +98,7 @@ pip install -r requirements-gui.txt
 
 1. 放到仓库默认位置：
 
-   - `img2kpf/plugins/kfx_output/KFX Output.zip`
+   - `img2kpf_core/plugins/kfx_output/KFX Output.zip`
 
 2. 放在任意位置，然后显式传路径：
 
@@ -126,7 +126,7 @@ python kpf_generator.py \
   --output ./output/Volume_01.kpf \
   --scribe-panel \
   --emit-kfx \
-  --kfx-plugin "./img2kpf/plugins/kfx_output/KFX Output.zip"
+  --kfx-plugin "./img2kpf_core/plugins/kfx_output/KFX Output.zip"
 ```
 
 ### 3）批量模式
@@ -144,7 +144,7 @@ python kpf_generator.py \
 ```bash
 python kfx_direct.py \
   --input ./output/Volume_01.kpf \
-  --plugin "./img2kpf/plugins/kfx_output/KFX Output.zip"
+  --plugin "./img2kpf_core/plugins/kfx_output/KFX Output.zip"
 ```
 
 ## GUI
@@ -202,10 +202,10 @@ python gui_app.py
 
 ## 仓库结构
 
-- `img2kpf/`：核心包
-- `img2kpf/gui/`：GUI 实现
-- `img2kpf/tools/kpf_analyzer.py`：KPF 结构分析工具
-- `img2kpf/plugins/`：插件清单与用户自备插件位置
+- `img2kpf_core/`：核心包
+- `img2kpf_core/gui/`：GUI 实现
+- `img2kpf_core/tools/kpf_analyzer.py`：KPF 结构分析工具
+- `img2kpf_core/plugins/`：插件清单与用户自备插件位置
 - `docs/parameter_guide.md`：英文参数手册
 - `docs/parameter_guide.zh-CN.md`：中文参数手册
 - `THIRD_PARTY_NOTICES.md`：第三方依赖与下载说明

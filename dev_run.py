@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from img2kpf.app_core import AppRunConfig, execute_run
-from img2kpf.gui.i18n import translate_gui_text
-from img2kpf.i18n import resolve_language
-from img2kpf.plugin_registry import DEFAULT_KFX_PLUGIN_ID
+from img2kpf_core.app_core import AppRunConfig, execute_run
+from img2kpf_core.gui.i18n import translate_gui_text
+from img2kpf_core.i18n import resolve_language
+from img2kpf_core.plugin_registry import DEFAULT_KFX_PLUGIN_ID
 
 # =========================
 # 程序员直跑入口（IDE 点运行）
