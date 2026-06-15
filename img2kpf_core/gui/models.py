@@ -3,9 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from ..plugin_registry import DEFAULT_KFX_PLUGIN_ID
-
-
 TriStateValue = Literal["auto", "enabled", "disabled"]
 
 TRI_STATE_OPTIONS = (
@@ -70,6 +67,8 @@ class GuiState:
     output_location: str = ""
     template_path: str = ""
     title: str = ""
+    custom_title_enabled: bool = False
+    volume_title_template: str = " 第 {volume} 卷"
     shift: bool = False
     reading_direction: str = "rtl"
     page_layout: str = "facing"
@@ -94,7 +93,7 @@ class GuiState:
     emit_kfx: bool = False
     shift_mode: str = "off"
     output_format: str = "kpf"
-    kfx_plugin: str = DEFAULT_KFX_PLUGIN_ID
+    kfx_plugin: str = ""
     jobs: int = 1
     language: str = "zh"
     theme_mode: str = "light"

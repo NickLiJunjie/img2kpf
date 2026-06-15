@@ -24,6 +24,7 @@ ApplicationWindow {
     property var controller: appController
     property string languageToken: controller !== null && controller !== undefined ? controller.language : "zh"
     property bool inputSectionExpanded: true
+    property bool toolsSectionExpanded: false
     property bool commonSectionExpanded: true
     property bool advancedExpanded: false
     property bool profilesSectionExpanded: false
@@ -57,6 +58,11 @@ ApplicationWindow {
     function value(name, fallbackValue) {
         const token = controllerRevision
         return hasController() ? controller.valueForKey(name, fallbackValue) : fallbackValue
+    }
+
+    function canOpenPathLocation(kind) {
+        const token = controllerRevision
+        return hasController() ? controller.canOpenPathLocation(kind) : false
     }
 
     function runAccentColor(state) {
@@ -220,12 +226,14 @@ ApplicationWindow {
     FolderDialog {
         id: inputDialog
         title: window.uiText("ui.choose.input.folder")
+        currentFolder: window.value("inputDialogFolder", "")
         onAccepted: controller.setInputDir(selectedFolder.toString())
     }
 
     FileDialog {
         id: templateDialog
         title: window.uiText("ui.choose.template.file")
+        currentFolder: window.value("templateDialogFolder", "")
         nameFilters: ["Kindle Package (*.kpf *.zip)", "All Files (*)"]
         onAccepted: controller.setTemplatePath(selectedFile.toString())
     }
@@ -233,6 +241,7 @@ ApplicationWindow {
     FileDialog {
         id: kfxPluginDialog
         title: window.uiText("ui.kfx.plugin")
+        currentFolder: window.value("kfxPluginDialogFolder", "")
         nameFilters: ["Zip Archive (*.zip)", "All Files (*)"]
         onAccepted: controller.setKfxPlugin(selectedFile.toString())
     }
@@ -858,6 +867,16 @@ ApplicationWindow {
                                 motion: motion
                                 buttonSize: 34
                                 iconSize: 18
+                                iconSource: Qt.resolvedUrl("../../assets/gui/icons/refresh.svg")
+                                toolTipText: window.uiText("ui.action.refresh")
+                                onClicked: controller.refreshCurrentState()
+                            }
+
+                            IconButton {
+                                theme: theme
+                                motion: motion
+                                buttonSize: 34
+                                iconSize: 18
                                 iconSource: Qt.resolvedUrl("../../assets/gui/icons/reset.svg")
                                 toolTipText: window.uiText("ui.action.reset.defaults")
                                 onClicked: controller.resetSettingsToDefaults()
@@ -909,6 +928,17 @@ ApplicationWindow {
                                         toolTipText: window.uiText("ui.action.choose.input.folder")
                                         onClicked: inputDialog.open()
                                     }
+
+                                    IconButton {
+                                        theme: theme
+                                        motion: motion
+                                        buttonSize: 34
+                                        iconSize: 18
+                                        iconSource: Qt.resolvedUrl("../../assets/gui/icons/open_output.svg")
+                                        toolTipText: window.uiText("ui.action.open.input.folder")
+                                        enabled: window.canOpenPathLocation("input")
+                                        onClicked: controller.openPathLocation("input")
+                                    }
                                 }
                             }
 
@@ -947,6 +977,17 @@ ApplicationWindow {
                                                 outputFileDialog.open()
                                         }
                                     }
+
+                                    IconButton {
+                                        theme: theme
+                                        motion: motion
+                                        buttonSize: 34
+                                        iconSize: 18
+                                        iconSource: Qt.resolvedUrl("../../assets/gui/icons/open_output.svg")
+                                        toolTipText: window.uiText("ui.action.open.output.location")
+                                        enabled: window.canOpenPathLocation("output")
+                                        onClicked: controller.openPathLocation("output")
+                                    }
                                 }
                             }
 
@@ -954,15 +995,64 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 theme: theme
                                 motion: motion
-                                label: window.uiText("ui.title")
+                                label: window.uiText("ui.title.settings")
+
+                                CheckBox {
+                                    id: customTitleCheck
+                                    Layout.fillWidth: true
+                                    text: window.uiText("ui.custom.title")
+                                    checked: window.value("customTitleEnabled", false)
+                                    spacing: 8
+                                    onToggled: controller.setCustomTitleEnabled(checked)
+
+                                    indicator: Rectangle {
+                                        x: customTitleCheck.leftPadding
+                                        y: parent.height / 2 - height / 2
+                                        width: 18
+                                        height: 18
+                                        radius: 5
+                                        color: customTitleCheck.checked ? theme.accentPrimary : theme.surfaceBase
+                                        border.color: customTitleCheck.checked ? theme.accentPrimary : theme.lineSubtle
+                                        border.width: 1
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            visible: customTitleCheck.checked
+                                            text: "✓"
+                                            color: "#FFFFFF"
+                                            font.pixelSize: 13
+                                            font.weight: Font.DemiBold
+                                        }
+                                    }
+
+                                    contentItem: Text {
+                                        text: customTitleCheck.text
+                                        color: theme.textPrimary
+                                        font.pixelSize: 13
+                                        font.weight: Font.DemiBold
+                                        verticalAlignment: Text.AlignVCenter
+                                        leftPadding: customTitleCheck.indicator.width + customTitleCheck.spacing
+                                    }
+                                }
 
                                 TextEntry {
                                     Layout.fillWidth: true
+                                    visible: window.value("customTitleEnabled", false)
                                     theme: theme
                                     motion: motion
                                     text: window.value("title", "")
-                                    placeholderText: window.uiText("ui.title")
+                                    placeholderText: window.value("inputMode", "") === "batch" ? window.uiText("ui.series.name") : window.uiText("ui.title")
                                     onEditingFinished: controller.setTitle(text)
+                                }
+
+                                TextEntry {
+                                    Layout.fillWidth: true
+                                    visible: window.value("volumeTitleTemplateVisible", false)
+                                    theme: theme
+                                    motion: motion
+                                    text: window.value("volumeTitleTemplate", "")
+                                    placeholderText: window.uiText("ui.volume.title.template")
+                                    onEditingFinished: controller.setVolumeTitleTemplate(text)
                                 }
                             }
                         }
@@ -1179,6 +1269,70 @@ ApplicationWindow {
                         }
 
                         CollapsibleSection {
+                            id: toolsSection
+                            theme: theme
+                            motion: motion
+                            title: window.uiText("ui.tools")
+                            expanded: window.toolsSectionExpanded
+                            onToggleRequested: expanded => {
+                                window.toolsSectionExpanded = expanded
+                            }
+
+                            FieldCard {
+                                Layout.fillWidth: true
+                                theme: theme
+                                motion: motion
+                                label: window.uiText("ui.spread.split.tool")
+                                metaText: window.value("splitSpreadsSummary", "")
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: theme.space12
+
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: window.value("splitSpreadsSummary", "")
+                                        color: theme.textSecondary
+                                        font.pixelSize: 12
+                                        wrapMode: Text.WordWrap
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+
+                                    Item {
+                                        id: splitSpreadsButtonHost
+                                        readonly property bool splitAvailable: window.value("canSplitSpreads", false)
+                                        Layout.preferredWidth: 132
+                                        Layout.preferredHeight: 36
+
+                                        PrimaryButton {
+                                            id: splitSpreadsButton
+                                            anchors.fill: parent
+                                            theme: theme
+                                            motion: motion
+                                            prominent: false
+                                            text: window.uiText("ui.action.split.spreads")
+                                            enabled: splitSpreadsButtonHost.splitAvailable
+                                            onClicked: controller.splitSpreads()
+                                        }
+
+                                        MouseArea {
+                                            id: splitDisabledHover
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            acceptedButtons: Qt.NoButton
+                                            enabled: !splitSpreadsButtonHost.splitAvailable
+                                            cursorShape: Qt.ForbiddenCursor
+                                        }
+
+                                        ToolTip.visible: !splitSpreadsButtonHost.splitAvailable && splitDisabledHover.containsMouse
+                                        ToolTip.delay: 260
+                                        ToolTip.text: window.value("splitSpreadsToolTip", "")
+                                    }
+                                }
+                            }
+                        }
+
+                        CollapsibleSection {
                             id: advancedSection
                             theme: theme
                             motion: motion
@@ -1235,11 +1389,21 @@ ApplicationWindow {
                                     toolTipText: window.uiText("ui.action.choose.template.file")
                                     onClicked: templateDialog.open()
                                 }
+
+                                IconButton {
+                                    theme: theme
+                                    motion: motion
+                                    buttonSize: 36
+                                    iconSize: 19
+                                    iconSource: Qt.resolvedUrl("../../assets/gui/icons/open_output.svg")
+                                    toolTipText: window.uiText("ui.action.open.template.location")
+                                    enabled: window.canOpenPathLocation("template")
+                                    onClicked: controller.openPathLocation("template")
+                                }
                             }
 
                             RowLayout {
                                 Layout.fillWidth: true
-                                visible: window.value("kfxPluginEnabled", false)
                                 spacing: theme.space12
 
                                 Text {
@@ -1259,7 +1423,7 @@ ApplicationWindow {
                                     motion: motion
                                     text: window.value("kfxPlugin", "")
                                     revealEnd: true
-                                    placeholderText: window.uiText("ui.default.kfx.output")
+                                    placeholderText: window.uiText("ui.kfx.plugin.load.prompt")
                                     onEditingFinished: controller.setKfxPlugin(text)
                                 }
 
@@ -1271,6 +1435,17 @@ ApplicationWindow {
                                     iconSource: Qt.resolvedUrl("../../assets/gui/icons/folder.svg")
                                     toolTipText: window.uiText("ui.action.choose.kfx.plugin")
                                     onClicked: kfxPluginDialog.open()
+                                }
+
+                                IconButton {
+                                    theme: theme
+                                    motion: motion
+                                    buttonSize: 36
+                                    iconSize: 19
+                                    iconSource: Qt.resolvedUrl("../../assets/gui/icons/open_output.svg")
+                                    toolTipText: window.uiText("ui.action.open.kfx.plugin.location")
+                                    enabled: window.canOpenPathLocation("kfx")
+                                    onClicked: controller.openPathLocation("kfx")
                                 }
                             }
 

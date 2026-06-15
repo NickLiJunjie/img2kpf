@@ -99,6 +99,8 @@ class AppRunConfig:
     output_location: str
     template_path: str = ""
     title: str = ""
+    custom_title_enabled: bool = False
+    volume_title_template: str = " 第 {volume} 卷"
     shift: bool = False
     reading_direction: str = "rtl"
     page_layout: str = "facing"
@@ -531,7 +533,7 @@ def _execute_single_run(
         template_assets=template_assets,
         input_dir=input_dir,
         output_path=build_output_path,
-        title=config.title.strip() or None,
+        title=config.title.strip() if config.custom_title_enabled and config.title.strip() else None,
         image_processing=image_processing,
         shift_first_page=config.shift,
         layout_options=layout_options,
@@ -645,6 +647,7 @@ def _execute_batch_run(
                     emit_kfx,
                     should_keep_kpf(config),
                     config.kfx_plugin.strip(),
+                    _resolve_batch_volume_title(config, subdir, index),
                 )
             except Exception as exc:
                 failures.append(VolumeFailure(volume_dir=subdir, reason=str(exc)))
@@ -670,8 +673,8 @@ def _execute_batch_run(
         status(_msg("ui.status.parallel.processing", workers=worker_count))
         log(_msg("ui.log.parallel.workers", workers=worker_count))
         completed = 0
-        pending_iter = iter(subdirs)
-        future_to_subdir: dict[concurrent.futures.Future[BuildResult], Path] = {}
+        pending_iter = iter(enumerate(subdirs, start=1))
+        future_to_subdir: dict[concurrent.futures.Future[BuildResult], tuple[int, Path]] = {}
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
             for _ in range(worker_count):
@@ -680,7 +683,7 @@ def _execute_batch_run(
                     stopped = True
                     break
                 try:
-                    next_subdir = next(pending_iter)
+                    next_index, next_subdir = next(pending_iter)
                 except StopIteration:
                     break
                 future = executor.submit(
@@ -694,8 +697,9 @@ def _execute_batch_run(
                     emit_kfx,
                     should_keep_kpf(config),
                     config.kfx_plugin.strip(),
+                    _resolve_batch_volume_title(config, next_subdir, next_index),
                 )
-                future_to_subdir[future] = next_subdir
+                future_to_subdir[future] = (next_index, next_subdir)
                 log(_msg("ui.started", name=next_subdir.name))
 
             while future_to_subdir:
@@ -704,7 +708,7 @@ def _execute_batch_run(
                     return_when=concurrent.futures.FIRST_COMPLETED,
                 )
                 for future in done:
-                    subdir = future_to_subdir.pop(future)
+                    _subdir_index, subdir = future_to_subdir.pop(future)
                     completed += 1
                     try:
                         result = future.result()
@@ -738,7 +742,7 @@ def _execute_batch_run(
                         continue
 
                     try:
-                        next_subdir = next(pending_iter)
+                        next_index, next_subdir = next(pending_iter)
                     except StopIteration:
                         continue
 
@@ -753,8 +757,9 @@ def _execute_batch_run(
                         emit_kfx,
                         should_keep_kpf(config),
                         config.kfx_plugin.strip(),
+                        _resolve_batch_volume_title(config, next_subdir, next_index),
                     )
-                    future_to_subdir[next_future] = next_subdir
+                    future_to_subdir[next_future] = (next_index, next_subdir)
                     log(_msg("ui.started", name=next_subdir.name))
 
         if should_stop():
@@ -793,13 +798,14 @@ def _run_one_volume(
     emit_kfx: bool,
     keep_kpf: bool,
     kfx_plugin_ref: str,
+    title: str | None = None,
 ) -> BuildResult:
     build_output_path = output_path if keep_kpf else output_path.with_suffix(".kpf")
     result = build_kpf(
         template_assets=template_assets,
         input_dir=input_dir,
         output_path=build_output_path,
-        title=input_dir.name,
+        title=title or input_dir.name,
         image_processing=image_processing,
         shift_first_page=shift_first_page,
         layout_options=layout_options,
@@ -821,6 +827,29 @@ def _run_one_volume(
             result.output_path = kfx_result.kfx_path
             result.kfx_output_path = None
     return result
+
+
+def _resolve_batch_volume_title(config: AppRunConfig, subdir: Path, volume_index: int) -> str:
+    series = config.title.strip()
+    if not config.custom_title_enabled or not series:
+        return subdir.name
+
+    template = config.volume_title_template
+    if not template.strip():
+        template = " 第 {volume} 卷"
+    values = {
+        "series": series,
+        "volume": volume_index,
+        "volume2": f"{volume_index:02d}",
+        "folder": subdir.name,
+    }
+    try:
+        rendered = template.format(**values)
+    except Exception:
+        rendered = f" 第 {volume_index} 卷"
+    if "{series}" in template:
+        return rendered.strip() or subdir.name
+    return f"{series}{rendered}".strip() or subdir.name
 
 
 def _capture_console_output(

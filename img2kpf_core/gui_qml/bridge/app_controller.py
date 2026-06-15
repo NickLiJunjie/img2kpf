@@ -24,6 +24,7 @@ from ...app_core import (
 )
 from ...i18n import decode_i18n_message, encode_i18n_message, resolve_language
 from ...plugin_registry import DEFAULT_KFX_PLUGIN_ID
+from ...spread_splitter import scan_spread_sources
 from ...gui.i18n import normalize_ui_language, translate_gui_text, ui_language_options
 from ...gui.models import (
     CROP_MODE_OPTIONS,
@@ -39,7 +40,7 @@ from ...gui.models import (
 )
 from ...gui.preview import render_preview
 from ...gui.settings import GuiSettingsStore
-from ...gui.workers import BuildWorker
+from ...gui.workers import BuildWorker, SplitSpreadWorker
 
 
 PROFILE_PRESERVED_FIELDS = frozenset(
@@ -47,6 +48,8 @@ PROFILE_PRESERVED_FIELDS = frozenset(
         "input_dir",
         "output_location",
         "title",
+        "custom_title_enabled",
+        "volume_title_template",
         "language",
         "theme_mode",
     }
@@ -116,8 +119,7 @@ class AppController(QObject):
         loaded_state = self._settings.load()
         language = normalize_ui_language(loaded_state.language or resolve_language(), default="zh")
         loaded_state.language = language
-        if not loaded_state.kfx_plugin:
-            loaded_state.kfx_plugin = DEFAULT_KFX_PLUGIN_ID
+        loaded_state.kfx_plugin = self._normalize_kfx_plugin_ref(loaded_state.kfx_plugin)
         if not loaded_state.image_custom and (
             not loaded_state.gamma_auto or not loaded_state.contrast_auto or not loaded_state.jpeg_quality_auto
         ):
@@ -137,12 +139,15 @@ class AppController(QObject):
         self._run_progress_name = ""
         self._run_cancel_requested = False
         self._run_pause_requested = False
+        self._active_task_kind = ""
         self._last_output_location = ""
         self._log_lines: list[dict[str, str]] = []
         self._selected_profile_name = self._initial_profile_name()
         self._worker_thread: QThread | None = None
         self._worker: BuildWorker | None = None
         self._last_detection = None
+        self._split_spread_image_count = 0
+        self._split_spread_candidate_count = 0
         self._preview_thread: QThread | None = None
         self._preview_worker: PreviewWorker | None = None
         self._preview_timer = QTimer(self)
@@ -179,6 +184,19 @@ class AppController(QObject):
     @Property(str, notify=stateChanged)
     def title(self) -> str:
         return self._state.title
+
+    @Property(bool, notify=stateChanged)
+    def customTitleEnabled(self) -> bool:
+        return self._state.custom_title_enabled
+
+    @Property(str, notify=stateChanged)
+    def volumeTitleTemplate(self) -> str:
+        return self._state.volume_title_template
+
+    @Property(bool, notify=stateChanged)
+    def volumeTitleTemplateVisible(self) -> bool:
+        detection = self._last_detection
+        return self._state.custom_title_enabled and detection is not None and detection.mode == "batch"
 
     @Property(str, notify=stateChanged)
     def imagePreset(self) -> str:
@@ -226,6 +244,18 @@ class AppController(QObject):
         if detection is not None and detection.mode == "batch":
             return "folder"
         return "file"
+
+    @Property(QUrl, notify=stateChanged)
+    def inputDialogFolder(self) -> QUrl:
+        return QUrl.fromLocalFile(str(self._input_dialog_folder()))
+
+    @Property(QUrl, notify=stateChanged)
+    def templateDialogFolder(self) -> QUrl:
+        return QUrl.fromLocalFile(str(self._path_or_input_dialog_folder(self._state.template_path)))
+
+    @Property(QUrl, notify=stateChanged)
+    def kfxPluginDialogFolder(self) -> QUrl:
+        return QUrl.fromLocalFile(str(self._path_or_input_dialog_folder(self._state.kfx_plugin)))
 
     @Property(QUrl, notify=stateChanged)
     def outputLocationDialogFolder(self) -> QUrl:
@@ -392,6 +422,31 @@ class AppController(QObject):
     def sourceSummary(self) -> str:
         return self._source_summary
 
+    @Property(bool, notify=stateChanged)
+    def canSplitSpreads(self) -> bool:
+        return not self._is_running and self._split_spread_candidate_count > 0
+
+    @Property(str, notify=stateChanged)
+    def splitSpreadsSummary(self) -> str:
+        if not self._state.input_dir.strip():
+            return self._tr("ui.spread.split.choose.input.first")
+        if self._split_spread_candidate_count <= 0:
+            return self._tr("ui.spread.split.no.spreads.detected")
+        return self._tr(
+            encode_i18n_message(
+                "ui.spread.split.detected.with.options",
+                count=self._split_spread_candidate_count,
+                total=self._split_spread_image_count,
+                direction=self._reading_direction_summary(self._state),
+            )
+        )
+
+    @Property(str, notify=stateChanged)
+    def splitSpreadsToolTip(self) -> str:
+        if self.canSplitSpreads:
+            return self._tr("ui.spread.split.tooltip")
+        return self._tr("ui.spread.split.disabled.tooltip")
+
     @Property(str, notify=detectionChanged)
     def headerCaptionText(self) -> str:
         if not self._state.input_dir.strip():
@@ -469,11 +524,11 @@ class AppController(QObject):
 
     @Property(bool, notify=stateChanged)
     def canPauseRun(self) -> bool:
-        return self._is_running and self._run_state == "running"
+        return self._active_task_kind == "build" and self._is_running and self._run_state == "running"
 
     @Property(bool, notify=stateChanged)
     def canResumeRun(self) -> bool:
-        return self._is_running and self._run_state == "paused"
+        return self._active_task_kind == "build" and self._is_running and self._run_state == "paused"
 
     @Property(bool, notify=stateChanged)
     def canCancelRun(self) -> bool:
@@ -493,7 +548,13 @@ class AppController(QObject):
 
     @Property(bool, notify=stateChanged)
     def canClearInputOutput(self) -> bool:
-        return bool(self._state.input_dir or self._state.output_location or self._state.title)
+        return bool(
+            self._state.input_dir
+            or self._state.output_location
+            or self._state.title
+            or self._state.custom_title_enabled
+            or self._state.volume_title_template != GuiState().volume_title_template
+        )
 
     @Property(str, notify=stateChanged)
     def logText(self) -> str:
@@ -654,6 +715,7 @@ class AppController(QObject):
         if self._state.input_dir == normalized:
             return
         self._state.input_dir = normalized
+        self._state.output_location = ""
         self._preview_anchor_page_number = None
         self._preview_selected_source_dir = None
         self._detect_input()
@@ -671,6 +733,53 @@ class AppController(QObject):
         self._mark_output_affecting_change()
         self._save()
         self.stateChanged.emit()
+
+    @Slot()
+    def splitSpreads(self) -> None:
+        if self._is_running:
+            return
+        if not self.canSplitSpreads:
+            self._status_text = self._tr("ui.spread.split.disabled.tooltip")
+            self.stateChanged.emit()
+            return
+
+        input_dir = Path(self._state.input_dir).expanduser()
+        self._save()
+        self._log_lines = []
+        self._is_running = True
+        self._active_task_kind = "split"
+        self._run_state = "running"
+        self._run_cancel_requested = False
+        self._run_pause_requested = False
+        self._run_progress_current = 0
+        self._run_progress_total = max(1, self._split_spread_image_count)
+        self._run_progress_successes = 0
+        self._run_progress_failures = 0
+        self._run_progress_name = ""
+        self._run_status_text = self._tr("ui.spread.split.running")
+        self._run_summary_text = self._tr("ui.spread.split.preparing")
+        self._status_text = self._tr("ui.spread.split.running")
+        self.stateChanged.emit()
+
+        self._worker_thread = QThread(self)
+        self._worker = SplitSpreadWorker(
+            input_dir,
+            self._state.reading_direction,
+            self._split_spread_source_dirs(),
+            jobs=self._state.jobs,
+            shift_first_page=self._state.shift,
+        )
+        self._worker.moveToThread(self._worker_thread)
+        self._worker_thread.started.connect(self._worker.run)
+        self._worker.log_message.connect(self._append_log)
+        self._worker.status_changed.connect(self._update_run_status)
+        self._worker.progress_changed.connect(self._update_progress)
+        self._worker.finished.connect(self._handle_split_finished)
+        self._worker.failed.connect(self._handle_split_failed)
+        self._worker.finished.connect(self._worker_thread.quit)
+        self._worker.failed.connect(self._worker_thread.quit)
+        self._worker_thread.finished.connect(self._cleanup_worker)
+        self._worker_thread.start()
 
     @Slot(str, result=bool)
     def profileExists(self, name: str) -> bool:
@@ -796,6 +905,25 @@ class AppController(QObject):
         self._save()
         self.stateChanged.emit()
 
+    @Slot(bool)
+    def setCustomTitleEnabled(self, value: bool) -> None:
+        enabled = bool(value)
+        if self._state.custom_title_enabled == enabled:
+            return
+        self._state.custom_title_enabled = enabled
+        self._mark_output_affecting_change()
+        self._save()
+        self.stateChanged.emit()
+
+    @Slot(str)
+    def setVolumeTitleTemplate(self, value: str) -> None:
+        if self._state.volume_title_template == value:
+            return
+        self._state.volume_title_template = value
+        self._mark_output_affecting_change()
+        self._save()
+        self.stateChanged.emit()
+
     @Slot(str, str)
     def setOption(self, name: str, value: str) -> None:
         if not hasattr(self._state, name):
@@ -804,6 +932,7 @@ class AppController(QObject):
             return
         setattr(self._state, name, value)
         if name == "output_format":
+            self._state.output_location = ""
             self._detect_input()
         if name == "image_preset":
             if self._state.gamma_auto:
@@ -904,7 +1033,7 @@ class AppController(QObject):
 
     @Slot(str)
     def setKfxPlugin(self, value: str) -> None:
-        normalized = self._normalize_path(value)
+        normalized = self._normalize_kfx_plugin_ref(self._normalize_path(value))
         if self._state.kfx_plugin == normalized:
             return
         self._state.kfx_plugin = normalized
@@ -995,11 +1124,25 @@ class AppController(QObject):
         self.stateChanged.emit()
 
     @Slot()
+    def refreshCurrentState(self) -> None:
+        if self._is_running:
+            return
+        if self._state.input_dir:
+            self._detect_input()
+            self._schedule_preview_refresh(immediate=True)
+        else:
+            self.detectionChanged.emit()
+        self._status_text = self._tr("ui.refreshed")
+        self.stateChanged.emit()
+
+    @Slot()
     def resetSettingsToDefaults(self) -> None:
         defaults = GuiState()
         preserved_input_dir = self._state.input_dir
         preserved_output_location = self._state.output_location
         preserved_title = self._state.title
+        preserved_custom_title_enabled = self._state.custom_title_enabled
+        preserved_volume_title_template = self._state.volume_title_template
         preserved_language = self._state.language
         preserved_theme_mode = self._state.theme_mode
 
@@ -1007,10 +1150,10 @@ class AppController(QObject):
         self._state.input_dir = preserved_input_dir
         self._state.output_location = preserved_output_location
         self._state.title = preserved_title
+        self._state.custom_title_enabled = preserved_custom_title_enabled
+        self._state.volume_title_template = preserved_volume_title_template
         self._state.language = preserved_language
         self._state.theme_mode = preserved_theme_mode
-        if not self._state.kfx_plugin:
-            self._state.kfx_plugin = DEFAULT_KFX_PLUGIN_ID
 
         if self._state.input_dir:
             self._detect_input()
@@ -1021,11 +1164,19 @@ class AppController(QObject):
 
     @Slot()
     def clearInputOutput(self) -> None:
-        if not (self._state.input_dir or self._state.output_location or self._state.title):
+        if not (
+            self._state.input_dir
+            or self._state.output_location
+            or self._state.title
+            or self._state.custom_title_enabled
+            or self._state.volume_title_template != GuiState().volume_title_template
+        ):
             return
         self._state.input_dir = ""
         self._state.output_location = ""
         self._state.title = ""
+        self._state.custom_title_enabled = False
+        self._state.volume_title_template = GuiState().volume_title_template
         self._preview_anchor_page_number = None
         self._preview_selected_source_dir = None
         self._last_output_location = ""
@@ -1125,6 +1276,7 @@ class AppController(QObject):
         self._append_log_entry("ui.run.started", level="info")
         self._append_log_entry(encode_i18n_message("ui.summary.output", path=output_location), level="muted")
         self._is_running = True
+        self._active_task_kind = "build"
         self._run_state = "running"
         self._run_cancel_requested = False
         self._run_pause_requested = False
@@ -1197,6 +1349,21 @@ class AppController(QObject):
             self._status_text = self._tr("ui.output.open.failed")
             self.stateChanged.emit()
 
+    @Slot(str, result=bool)
+    def canOpenPathLocation(self, kind: str) -> bool:
+        return self._open_location_target(kind) is not None
+
+    @Slot(str)
+    def openPathLocation(self, kind: str) -> None:
+        target = self._open_location_target(kind)
+        if target is None:
+            self._status_text = self._tr("ui.path.open.unavailable")
+            self.stateChanged.emit()
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(target))):
+            self._status_text = self._tr("ui.path.open.failed")
+            self.stateChanged.emit()
+
     @Slot(result="QVariantMap")
     def stateSnapshot(self) -> dict:
         return asdict(self._state)
@@ -1207,6 +1374,8 @@ class AppController(QObject):
             output_location=self._state.output_location,
             template_path=self._state.template_path,
             title=self._state.title,
+            custom_title_enabled=self._state.custom_title_enabled,
+            volume_title_template=self._state.volume_title_template,
             shift=self._state.shift,
             reading_direction=self._state.reading_direction,
             page_layout=self._state.page_layout,
@@ -1236,6 +1405,7 @@ class AppController(QObject):
         input_text = self._state.input_dir.strip()
         self._is_runnable = False
         self._last_detection = None
+        self._clear_split_spread_detection()
         if not input_text:
             self._status_text = self._tr("ui.no.folder.selected")
             self._source_summary = ""
@@ -1255,6 +1425,7 @@ class AppController(QObject):
         except Exception as exc:
             self._status_text = self._tr(str(exc))
             self._source_summary = ""
+            self._clear_split_spread_detection()
             self._preview_source = ""
             self._preview_status_text = self._tr("ui.preview.temporarily.unavailable")
             self._preview_hint_text = self._tr("ui.preview.reflects.crop.color.single.facing.rtl")
@@ -1268,6 +1439,7 @@ class AppController(QObject):
 
         self._last_detection = detection
         self._is_runnable = detection.is_runnable
+        self._update_split_spread_detection(detection)
         if detection.mode == "batch" and detection.image_subdirs:
             if self._preview_selected_source_dir not in detection.image_subdirs:
                 self._preview_selected_source_dir = detection.image_subdirs[0]
@@ -1287,6 +1459,35 @@ class AppController(QObject):
                 self._state.output_location = str(suggestion)
         self.detectionChanged.emit()
         self.stateChanged.emit()
+
+    def _clear_split_spread_detection(self) -> None:
+        self._split_spread_image_count = 0
+        self._split_spread_candidate_count = 0
+
+    def _update_split_spread_detection(self, detection) -> None:
+        self._clear_split_spread_detection()
+        if detection.mode not in {"single", "batch"} or not detection.is_runnable:
+            return
+        source_dirs = self._split_spread_source_dirs(detection)
+        if not source_dirs:
+            return
+        try:
+            scan = scan_spread_sources(detection.input_dir, source_dirs)
+        except Exception:
+            return
+        self._split_spread_image_count = scan.image_count
+        self._split_spread_candidate_count = scan.spread_count
+
+    def _split_spread_source_dirs(self, detection: object | None = None) -> tuple[Path, ...]:
+        detection = detection or self._last_detection
+        if detection is None:
+            return tuple()
+        mode = getattr(detection, "mode", "")
+        if mode == "batch":
+            return tuple(getattr(detection, "image_subdirs", tuple()))
+        if mode == "single":
+            return (getattr(detection, "input_dir"),)
+        return tuple()
 
     def _schedule_preview_refresh(self, immediate: bool = False) -> None:
         if self._resolve_preview_source_dir() is not None:
@@ -1575,6 +1776,60 @@ class AppController(QObject):
         self._run_pause_requested = False
         self.stateChanged.emit()
 
+    def _handle_split_finished(self, result: object) -> None:
+        output_dir = Path(str(getattr(result, "output_dir", ""))).expanduser()
+        output_count = int(getattr(result, "output_image_count", 0) or 0)
+        split_count = int(getattr(result, "split_image_count", 0) or 0)
+        blank_count = int(getattr(result, "blank_page_count", 0) or 0)
+        self._run_state = "completed"
+        self._run_status_text = self._tr("ui.task.completed")
+        self._run_progress_current = max(self._run_progress_current, self._run_progress_total)
+        self._run_summary_text = self._tr(
+            encode_i18n_message(
+                "ui.spread.split.completed",
+                split=split_count,
+                blank=blank_count,
+                output=output_count,
+                path=output_dir,
+            )
+        )
+        self._status_text = self._tr(
+            encode_i18n_message("ui.spread.split.switched.input", path=output_dir)
+        )
+        if output_dir:
+            self._state.input_dir = str(output_dir)
+            self._state.output_location = ""
+            self._preview_anchor_page_number = None
+            self._preview_selected_source_dir = None
+            self._detect_input()
+            self._save()
+            self._schedule_preview_refresh(immediate=True)
+        self._run_cancel_requested = False
+        self._run_pause_requested = False
+        self.stateChanged.emit()
+
+    def _handle_split_failed(self, message: str) -> None:
+        is_cancelled = message == "ui.spread.split.cancelled"
+        level = "muted" if is_cancelled else "danger"
+        log_key = "ui.spread.split.cancelled" if is_cancelled else "ui.spread.split.failed"
+        if is_cancelled:
+            self._append_log_entry(log_key, level=level)
+            self._run_state = "cancelled"
+            self._run_status_text = self._tr("ui.task.cancelled")
+            self._run_summary_text = self._tr("ui.spread.split.cancelled")
+            self._status_text = self._tr("ui.task.cancelled")
+        else:
+            self._append_log_entry(encode_i18n_message(log_key, reason=message), level=level)
+            self._run_state = "failed"
+            self._run_status_text = self._tr("ui.task.failed")
+            self._run_summary_text = self._tr(
+                encode_i18n_message("ui.spread.split.failed", reason=message)
+            )
+            self._status_text = self._tr("ui.task.failed")
+        self._run_cancel_requested = False
+        self._run_pause_requested = False
+        self.stateChanged.emit()
+
     def _handle_failed(self, message: str) -> None:
         self._append_log_entry(encode_i18n_message("ui.log.run.failed", reason=message), level="danger")
         self._run_state = "failed"
@@ -1593,6 +1848,7 @@ class AppController(QObject):
             self._worker_thread.deleteLater()
             self._worker_thread = None
         self._is_running = False
+        self._active_task_kind = ""
         self.stateChanged.emit()
 
     def _mark_output_affecting_change(self) -> None:
@@ -1627,6 +1883,7 @@ class AppController(QObject):
         self._run_progress_name = ""
         self._run_cancel_requested = False
         self._run_pause_requested = False
+        self._active_task_kind = ""
 
     def _output_open_target(self) -> Path | None:
         if not self._last_output_location.strip():
@@ -1637,6 +1894,37 @@ class AppController(QObject):
         if path.exists():
             return path.parent
         if path.suffix and path.parent.exists():
+            return path.parent
+        return None
+
+    def _open_location_target(self, kind: str) -> Path | None:
+        normalized_kind = kind.strip().lower()
+        if normalized_kind in {"input", "inputdir", "input_dir"}:
+            return self._path_location_target(self._state.input_dir, prefer_directory=True)
+        if normalized_kind in {"output", "outputlocation", "output_location"}:
+            return self._path_location_target(self._state.output_location, prefer_directory=True)
+        if normalized_kind in {"template", "templatepath", "template_path"}:
+            return self._path_location_target(self._state.template_path)
+        if normalized_kind in {"kfx", "kfxplugin", "kfx_plugin"}:
+            return self._kfx_plugin_location_target()
+        return None
+
+    def _kfx_plugin_location_target(self) -> Path | None:
+        return self._path_location_target(self._state.kfx_plugin)
+
+    def _path_location_target(self, value: str, *, prefer_directory: bool = False) -> Path | None:
+        normalized = self._normalize_path(value).strip()
+        if not normalized:
+            return None
+        path = Path(normalized).expanduser()
+        if path.is_dir():
+            return path
+        if path.exists():
+            return path.parent
+        has_meaningful_parent = path.is_absolute() or path.parent != Path(".")
+        if prefer_directory and has_meaningful_parent and path.parent.exists():
+            return path.parent
+        if path.suffix and has_meaningful_parent and path.parent.exists():
             return path.parent
         return None
 
@@ -1671,8 +1959,7 @@ class AppController(QObject):
         self._state = state
         for field, value in preserved.items():
             setattr(self._state, field, value)
-        if not self._state.kfx_plugin:
-            self._state.kfx_plugin = DEFAULT_KFX_PLUGIN_ID
+        self._state.kfx_plugin = self._normalize_kfx_plugin_ref(self._state.kfx_plugin)
 
         if self._state.input_dir:
             self._detect_input()
@@ -1706,8 +1993,8 @@ class AppController(QObject):
         payload = asdict(state)
         for field in PROFILE_PRESERVED_FIELDS:
             payload.pop(field, None)
-        if not payload.get("kfx_plugin"):
-            payload["kfx_plugin"] = DEFAULT_KFX_PLUGIN_ID
+        if payload.get("kfx_plugin") == DEFAULT_KFX_PLUGIN_ID:
+            payload["kfx_plugin"] = ""
         return payload
 
     def _profile_summary_text(self, name: str, is_default: bool) -> str:
@@ -1827,9 +2114,9 @@ class AppController(QObject):
         return self._file_name_or_not_set(state.template_path)
 
     def _kfx_plugin_summary(self, state: GuiState) -> str:
-        path = state.kfx_plugin
-        if not path or path == DEFAULT_KFX_PLUGIN_ID:
-            return self._tr("ui.default.kfx.output")
+        path = self._normalize_kfx_plugin_ref(state.kfx_plugin)
+        if not path:
+            return self._tr("ui.kfx.plugin.load.prompt")
         return self._file_name_or_not_set(path)
 
     def _file_name_or_not_set(self, path: str) -> str:
@@ -1839,6 +2126,26 @@ class AppController(QObject):
 
     def _jobs_summary(self, state: GuiState) -> str:
         return str(state.jobs)
+
+    def _input_dialog_folder(self) -> Path:
+        if self._state.input_dir.strip():
+            path = Path(self._state.input_dir).expanduser()
+            if path.is_dir():
+                return path
+            if path.parent.exists():
+                return path.parent
+        return Path.home()
+
+    def _path_or_input_dialog_folder(self, value: str) -> Path:
+        if value.strip():
+            path = Path(value).expanduser()
+            if path.is_dir():
+                return path
+            if path.exists() and path.parent.exists():
+                return path.parent
+            if path.parent != Path(".") and path.parent.exists():
+                return path.parent
+        return self._input_dialog_folder()
 
     def _output_dialog_folder(self) -> Path:
         if self._state.output_location.strip():
@@ -1950,6 +2257,16 @@ class AppController(QObject):
         if not value:
             return ""
         if value.startswith("file:"):
+            local_file = QUrl(value).toLocalFile()
+            if local_file:
+                return local_file
             parsed = urlparse(value)
             return unquote(parsed.path)
         return value
+
+    @staticmethod
+    def _normalize_kfx_plugin_ref(value: str) -> str:
+        normalized = value.strip()
+        if normalized == DEFAULT_KFX_PLUGIN_ID:
+            return ""
+        return normalized
