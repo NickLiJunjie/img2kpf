@@ -6,7 +6,25 @@ import sys
 from dataclasses import asdict, fields
 from pathlib import Path
 
-from .models import GuiState
+from .models import (
+    CROP_MODE_OPTIONS,
+    CROP_STRENGTH_SEMANTICS_VERSION,
+    GuiState,
+    JOBS_MAX,
+    JOBS_MIN,
+    PERFORMANCE_MODE_OPTIONS,
+    SPREAD_CROP_STRENGTH_DEFAULT,
+)
+
+
+def _legacy_value_to_retention_ratio(value: float, semantics_version: object) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        numeric = 1.00
+    if semantics_version == 2:
+        numeric = 1.70 - numeric
+    return round(max(0.70, min(1.00, numeric)), 2)
 
 
 def _config_root(app_name: str) -> Path:
@@ -135,4 +153,28 @@ class GuiSettingsStore:
             state.shift_mode = "on" if state.shift else "off"
         if "output_format" not in raw_payload:
             state.output_format = "kpf_kfx" if state.emit_kfx else "kpf"
+        if state.preserve_color == "auto":
+            state.preserve_color = "enabled"
+        semantics_version = raw_payload.get("crop_strength_semantics_version")
+        if semantics_version != CROP_STRENGTH_SEMANTICS_VERSION:
+            state.crop_edge_threshold = _legacy_value_to_retention_ratio(state.crop_edge_threshold, semantics_version)
+            state.spread_fill_edge_threshold = _legacy_value_to_retention_ratio(
+                state.spread_fill_edge_threshold,
+                semantics_version,
+            )
+            state.spread_fill_inner_edge_threshold = _legacy_value_to_retention_ratio(
+                state.spread_fill_inner_edge_threshold,
+                semantics_version,
+            )
+            if semantics_version == 3:
+                state.spread_fill_edge_threshold = SPREAD_CROP_STRENGTH_DEFAULT
+                state.spread_fill_inner_edge_threshold = SPREAD_CROP_STRENGTH_DEFAULT
+            state.crop_strength_semantics_version = CROP_STRENGTH_SEMANTICS_VERSION
+        valid_crop_modes = {value for value, _ in CROP_MODE_OPTIONS}
+        if state.crop_mode not in valid_crop_modes:
+            state.crop_mode = "off"
+        valid_performance_modes = {value for value, _ in PERFORMANCE_MODE_OPTIONS}
+        if state.performance_mode not in valid_performance_modes:
+            state.performance_mode = "balanced"
+        state.jobs = max(JOBS_MIN, min(int(state.jobs), JOBS_MAX))
         return state

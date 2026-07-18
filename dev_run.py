@@ -41,7 +41,7 @@ from img2kpf_core.plugin_registry import DEFAULT_KFX_PLUGIN_ID
 # - "none" / "kcc-current-like" / "kcc-legacy-like"
 #
 # crop_mode:
-# - "off" / "smart" / "kcc-spread" / "kcc-spread-fill"
+# - "off" / "smart" / "spread-fill"
 #
 # target_size_text:
 # - 空字符串 "" 表示不指定

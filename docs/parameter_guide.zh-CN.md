@@ -44,9 +44,18 @@
 
 ### `--jobs INT`
 
-- 作用：批量并行 worker 数
+- 作用：批量并行任务数
 - 对图片的影响：没有直接影响
-- 实际意义：卷数很多时可提速，但会提高 CPU / 磁盘压力
+- 实际意义：卷数很多时可同时处理多卷；单卷内部图片处理速度由 `--performance-mode` 控制
+
+### `--performance-mode {eco,balanced,max}`
+
+- 作用：控制单卷内部图片预处理并行度
+- 对图片的影响：没有；只改变运行速度
+- 推荐：
+  - `eco`：串行，最稳、占用最低
+  - `balanced`：约半数 CPU，默认推荐
+  - `max`：最多 16 个图片预处理线程，适合 M 系列高配机器
 
 ## 2）KFX 生成
 
@@ -165,22 +174,14 @@
   - 会保留安全余量
   - 当内容离边缘太近时，不会特别激进
 
-### `--crop-mode spread-safe`
+### `--crop-mode spread-fill`
 
 - 双页联动裁边
 - 对图片的影响：
-  - 尽量让左右页看起来一致
-  - 可以减少同一 spread 左右页裁边不对称
-  - 比 fill 更稳妥
-
-### `--crop-mode spread-fill`
-
-- 双页联动裁边 + 在安全前提下减少中缝留白
-- 对图片的影响：
-  - 目标是减少中缝空白，让页面更铺满高度
-  - 比 `spread-safe` 更激进
-  - 在 Scribe 上往往更有“铺满屏幕”的感觉
-  - 但书与书差异较大，建议逐本测试
+  - 左右页按同一组规则计算裁边，减少同一 spread 的不对称
+  - 会按目标设备比例寻找更合适的裁边框
+  - 默认保护内边；启用内边裁切后，也只裁连续亮色低信息区
+  - 书与书差异较大，建议逐本检查预览
 
 ## 6）画布与设备适配
 
@@ -268,7 +269,7 @@ python kpf_generator.py \
   --scribe-panel
 ```
 
-### 偏亮、偏 Scribe 的方案
+### 智能单页方案
 
 ```bash
 python kpf_generator.py \
@@ -279,11 +280,11 @@ python kpf_generator.py \
   --virtual-panels \
   --panel-movement vertical \
   --image-preset bright \
-  --crop-mode spread-safe \
+  --crop-mode smart \
   --scribe-panel
 ```
 
-### 更激进的铺满方案
+### 双页联动方案
 
 ```bash
 python kpf_generator.py \
@@ -297,7 +298,7 @@ python kpf_generator.py \
 ## 10）实战建议
 
 - 先从 `--crop-mode off` 起步，再决定是否真的需要裁边。
-- 如果双页看起来左右不一致，先试 `spread-safe`，再试 `spread-fill`。
+- 如果是 Facing 双页，使用 `--crop-mode spread-fill`，再根据预览决定是否允许内边裁切。
 - 如果真机上偏暗，优先试 `bright` 或手动提高 `--gamma`。
 - 如果彩页发灰，就保留 `--preserve-color`。
 - 如果输入图已经是你精修过的，优先从 `--image-preset none` 开始。

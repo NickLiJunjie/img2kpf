@@ -6,15 +6,21 @@ import concurrent.futures
 import hashlib
 import json
 import math
+import os
 import shutil
 import sqlite3
 import struct
+import sys
 import uuid
 import zipfile
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    __package__ = "img2kpf_core"
 
 from .kfx_direct import convert_kpf_to_kfx
 from .plugin_registry import DEFAULT_KFX_PLUGIN_ID
@@ -33,14 +39,17 @@ IMAGE_PRESET_ALIASES = {
 CROP_MODE_ALIASES = {
     "off": "off",
     "smart": "smart",
-    "spread-safe": "spread-safe",
     "spread-fill": "spread-fill",
-    "kcc-spread": "spread-safe",
-    "kcc-spread-fill": "spread-fill",
 }
 
 VALID_IMAGE_PRESETS = ("none", "standard", "bright")
-VALID_CROP_MODES = ("off", "smart", "spread-safe", "spread-fill")
+VALID_CROP_MODES = ("off", "smart", "spread-fill")
+PERFORMANCE_MODE_ALIASES = {
+    "eco": "eco",
+    "balanced": "balanced",
+    "max": "max",
+}
+VALID_PERFORMANCE_MODES = ("eco", "balanced", "max")
 
 SQLITE_FINGERPRINT_OFFSET = 1024
 SQLITE_FINGERPRINT_RECORD_LEN = 1024
@@ -104,7 +113,11 @@ KCC_FILL_OUTER_LOW_INFO_DARK_MEAN_MAX = 72.0
 KCC_FILL_OUTER_LOW_INFO_LIGHT_MEAN_MIN = 232.0
 KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO_MIN = 0.70
 KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO_MAX = 1.00
-KCC_FILL_TARGET_ASPECT_TOLERANCE = 0.002
+KCC_CROP_STRENGTH_DEFAULT = 1.00
+KCC_RATIO_FRAME_SCORE_SIZE = 256
+KCC_RATIO_FRAME_CANDIDATE_STEPS = 24
+KCC_INNER_TRADEOFF_BASE_IMPROVEMENT = 0.10
+KCC_INNER_TRADEOFF_FULL_IMPROVEMENT = 0.45
 
 ReadingDirection = Literal["rtl", "ltr"]
 PageLayout = Literal["facing", "single"]
@@ -134,6 +147,30 @@ def normalize_crop_mode(value: str) -> str:
     return _normalize_named_value(value, CROP_MODE_ALIASES, argument_name="crop mode")
 
 
+def normalize_performance_mode(value: str) -> str:
+    return _normalize_named_value(value, PERFORMANCE_MODE_ALIASES, argument_name="performance mode")
+
+
+def resolve_preprocessing_workers(performance_mode: str) -> int:
+    cpu_count = os.cpu_count() or 4
+    mode = normalize_performance_mode(performance_mode)
+    if mode == "eco":
+        return 1
+    if mode == "balanced":
+        return max(2, min(8, cpu_count // 2))
+    return max(2, min(16, cpu_count))
+
+
+def resolve_parallel_jobs(performance_mode: str) -> int:
+    cpu_count = os.cpu_count() or 4
+    mode = normalize_performance_mode(performance_mode)
+    if mode == "eco":
+        return 1
+    if mode == "balanced":
+        return max(1, min(4, cpu_count // 4))
+    return max(2, min(8, cpu_count // 2))
+
+
 def parse_image_preset(value: str) -> str:
     try:
         return normalize_image_preset(value)
@@ -148,12 +185,41 @@ def parse_crop_mode(value: str) -> str:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+def parse_performance_mode(value: str) -> str:
+    try:
+        return normalize_performance_mode(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 @dataclass(frozen=True)
 class LayoutOptions:
     reading_direction: ReadingDirection = "rtl"
     page_layout: PageLayout = "facing"
     virtual_panels: bool = True
     panel_movement: PanelMovement = "vertical"
+
+
+@dataclass(frozen=True)
+class BuildStageProgress:
+    phase: str
+    current: int
+    total: int
+    current_name: str = ""
+    workers: int = 1
+    indeterminate: bool = False
+
+
+BuildProgressCallback = Callable[[BuildStageProgress], None]
+
+
+class BuildCancelled(RuntimeError):
+    pass
+
+
+def raise_if_build_cancelled(stop_requested: Callable[[], bool] | None) -> None:
+    if stop_requested is not None and stop_requested():
+        raise BuildCancelled("ui.task.cancelled")
 
 
 @dataclass(frozen=True)
@@ -470,13 +536,17 @@ class CropMargins:
 class ImageProcessingOptions:
     target_size: tuple[int, int] | None = None
     crop_mode: str = "off"
-    spread_fill_edge_threshold: float = KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO
+    crop_edge_threshold: float = KCC_CROP_STRENGTH_DEFAULT
+    spread_fill_edge_threshold: float = KCC_CROP_STRENGTH_DEFAULT
+    spread_fill_inner_enabled: bool = False
+    spread_fill_inner_edge_threshold: float = KCC_CROP_STRENGTH_DEFAULT
     preserve_color: bool = True
     gamma: float = 1.0
     contrast: float = 1.0
     autocontrast: bool = False
     autolevel: bool = False
     jpeg_quality: int = 90
+    preprocessing_workers: int = 1
 
     @property
     def enabled(self) -> bool:
@@ -902,6 +972,26 @@ def column_histogram_is_outer_low_information(
     )
 
 
+def column_histogram_is_light_low_information(
+    histogram: list[int],
+    dominant_ratio_threshold: float = KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO,
+) -> bool:
+    total = sum(histogram)
+    if total <= 0:
+        return True
+
+    dominant_ratio_threshold = max(
+        KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO_MIN,
+        min(KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO_MAX, dominant_ratio_threshold),
+    )
+    light_ratio = sum(histogram[KCC_FILL_LOW_INFO_LIGHT_THRESHOLD :]) / total
+    mean, stddev = histogram_mean_and_stddev(histogram)
+
+    if light_ratio >= dominant_ratio_threshold:
+        return True
+    return stddev <= KCC_FILL_OUTER_LOW_INFO_STDDEV_MAX and mean >= KCC_FILL_OUTER_LOW_INFO_LIGHT_MEAN_MIN
+
+
 def measure_low_information_margin(
     gray_image,
     side: str,
@@ -935,14 +1025,87 @@ def measure_outer_low_information_margin(
         return 0
 
     limit = max(0, min(max_trim, width - 1))
+    cumulative_histogram = [0] * 256
     trim = 0
     while trim < limit:
         if side == "left":
             column_box = (trim, 0, trim + 1, height)
         else:
             column_box = (width - trim - 1, 0, width - trim, height)
+        column_histogram = gray_image.crop(column_box).histogram()
+        cumulative_histogram = [
+            current + added
+            for current, added in zip(cumulative_histogram, column_histogram)
+        ]
         if not column_histogram_is_outer_low_information(
-            gray_image.crop(column_box).histogram(),
+            cumulative_histogram,
+            dominant_ratio_threshold=dominant_ratio_threshold,
+        ):
+            break
+        trim += 1
+    return trim
+
+
+def measure_light_low_information_margin(
+    gray_image,
+    side: str,
+    max_trim: int,
+    dominant_ratio_threshold: float = KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO,
+) -> int:
+    width, height = gray_image.size
+    if width <= 1 or height <= 0:
+        return 0
+
+    limit = max(0, min(max_trim, width - 1))
+    cumulative_histogram = [0] * 256
+    trim = 0
+    while trim < limit:
+        if side == "left":
+            column_box = (trim, 0, trim + 1, height)
+        else:
+            column_box = (width - trim - 1, 0, width - trim, height)
+        column_histogram = gray_image.crop(column_box).histogram()
+        cumulative_histogram = [
+            current + added
+            for current, added in zip(cumulative_histogram, column_histogram)
+        ]
+        if not column_histogram_is_light_low_information(
+            cumulative_histogram,
+            dominant_ratio_threshold=dominant_ratio_threshold,
+        ):
+            break
+        trim += 1
+    return trim
+
+
+def measure_vertical_low_information_margin(
+    image,
+    crop_box: tuple[int, int, int, int],
+    side: str,
+    dominant_ratio_threshold: float = KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO,
+) -> int:
+    gray = image.convert("L")
+    left, top, right, bottom = crop_box
+    focused = gray.crop((left, top, right, bottom))
+    width, height = focused.size
+    if width <= 0 or height <= 1:
+        return 0
+    max_trim = int(height * KCC_CROP_SIDE_RATIO_LIMIT)
+    limit = max(0, min(max_trim, height - 1))
+    cumulative_histogram = [0] * 256
+    trim = 0
+    while trim < limit:
+        if side == "top":
+            row_box = (0, trim, width, trim + 1)
+        else:
+            row_box = (0, height - trim - 1, width, height)
+        row_histogram = focused.crop(row_box).histogram()
+        cumulative_histogram = [
+            current + added
+            for current, added in zip(cumulative_histogram, row_histogram)
+        ]
+        if not column_histogram_is_outer_low_information(
+            cumulative_histogram,
             dominant_ratio_threshold=dominant_ratio_threshold,
         ):
             break
@@ -1002,57 +1165,58 @@ def measure_low_information_edge_margin(
     page_position: str,
     template_direction: str | None,
     edge_role: str,
+    dominant_ratio_threshold: float | None = None,
 ) -> int:
     gray = image.convert("L")
     left, top, right, bottom = crop_box
     focused = gray.crop((left, top, right, bottom))
     side = edge_name_for_role(page_position, template_direction, edge_role)
     max_trim = int(focused.size[0] * KCC_CROP_SIDE_RATIO_LIMIT)
+    if dominant_ratio_threshold is not None:
+        return measure_outer_low_information_margin(
+            focused,
+            side,
+            max_trim,
+            dominant_ratio_threshold=dominant_ratio_threshold,
+        )
     return measure_low_information_margin(focused, side, max_trim)
 
 
-def measure_outer_preferred_edge_margin(
+def measure_low_information_edge_budget(
     image,
     crop_box: tuple[int, int, int, int],
     page_position: str,
     template_direction: str | None,
-    dominant_ratio_threshold: float = KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO,
+    edge_role: str,
+    max_trim: int,
 ) -> int:
+    if max_trim <= 0:
+        return 0
+
     gray = image.convert("L")
+    background = detect_border_background(gray)
     left, top, right, bottom = crop_box
     focused = gray.crop((left, top, right, bottom))
-    outer_edge, _ = get_facing_page_horizontal_roles(page_position, template_direction)
-    max_trim = int(focused.size[0] * KCC_CROP_SIDE_RATIO_LIMIT)
-    return max(
-        measure_detected_background_margin(image, crop_box, page_position, template_direction, "outer"),
-        measure_outer_low_information_margin(
+    side = edge_name_for_role(page_position, template_direction, edge_role)
+    limit = max(0, min(max_trim, focused.size[0] - 1))
+    detected = 0
+    if background is not None:
+        detected = measure_contiguous_background_margin(focused, side, background, limit)
+    if edge_role == "inner":
+        light_information = measure_light_low_information_margin(
             focused,
-            outer_edge,
-            max_trim,
-            dominant_ratio_threshold=dominant_ratio_threshold,
-        ),
+            side,
+            limit,
+            dominant_ratio_threshold=KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO,
+        )
+        return max(detected if background == "white" else 0, light_information)
+    low_information = measure_outer_low_information_margin(
+        focused,
+        side,
+        limit,
+        dominant_ratio_threshold=KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO,
     )
-
-
-def compute_inner_trim_needed_for_height_fill(
-    crop_box: tuple[int, int, int, int],
-    target_size: tuple[int, int] | None,
-) -> int:
-    if target_size is None:
-        return 0
-
-    left, top, right, bottom = crop_box
-    cropped_width = right - left
-    cropped_height = bottom - top
-    if cropped_width <= 0 or cropped_height <= 0:
-        return 0
-
-    target_aspect = target_size[0] / target_size[1]
-    current_aspect = cropped_width / cropped_height
-    if current_aspect <= target_aspect:
-        return 0
-
-    return max(0, math.ceil(cropped_width - cropped_height * target_aspect))
+    return max(detected, low_information)
 
 
 def expand_crop_box_towards_target_aspect(
@@ -1123,23 +1287,6 @@ def expand_crop_box_towards_target_aspect(
     )
 
 
-def add_inner_trim_to_crop_box(
-    image_size: tuple[int, int],
-    crop_box: tuple[int, int, int, int],
-    page_position: str,
-    template_direction: str | None,
-    inner_trim: int,
-) -> tuple[int, int, int, int]:
-    return add_edge_trim_to_crop_box(
-        image_size,
-        crop_box,
-        page_position,
-        template_direction,
-        edge_role="inner",
-        trim_amount=inner_trim,
-    )
-
-
 def add_edge_trim_to_crop_box(
     image_size: tuple[int, int],
     crop_box: tuple[int, int, int, int],
@@ -1170,197 +1317,673 @@ def add_edge_trim_to_crop_box(
     return updated.to_box(image_size)
 
 
-def _remaining_height_fill_trim(
-    left_crop_box: tuple[int, int, int, int] | None,
-    right_crop_box: tuple[int, int, int, int] | None,
+def _target_horizontal_trim_required(
+    crop_box: tuple[int, int, int, int],
     target_size: tuple[int, int] | None,
-) -> tuple[int, int, int]:
-    if left_crop_box is None or right_crop_box is None:
-        return 0, 0, 0
-    left_required = compute_inner_trim_needed_for_height_fill(left_crop_box, target_size)
-    right_required = compute_inner_trim_needed_for_height_fill(right_crop_box, target_size)
-    return left_required, right_required, max(left_required, right_required)
+) -> int:
+    if target_size is None:
+        return 0
+    target_width, target_height = target_size
+    if target_width <= 0 or target_height <= 0:
+        return 0
+    left, top, right, bottom = crop_box
+    width = right - left
+    height = bottom - top
+    if width <= 0 or height <= 0:
+        return 0
+    target_aspect = target_width / target_height
+    if width / height <= target_aspect:
+        return 0
+    return max(0, width - math.floor(height * target_aspect))
 
 
-def _apply_shared_edge_trim_stage(
-    left_image,
-    left_crop_box: tuple[int, int, int, int],
-    right_image,
-    right_crop_box: tuple[int, int, int, int],
-    template_direction: str | None,
-    edge_role: str,
-    trim_request: int,
+def _target_vertical_trim_required(
+    crop_box: tuple[int, int, int, int],
+    target_size: tuple[int, int] | None,
+) -> int:
+    if target_size is None:
+        return 0
+    target_width, target_height = target_size
+    if target_width <= 0 or target_height <= 0:
+        return 0
+    left, top, right, bottom = crop_box
+    width = right - left
+    height = bottom - top
+    if width <= 0 or height <= 0:
+        return 0
+    target_aspect = target_width / target_height
+    if width / height >= target_aspect:
+        return 0
+    return max(0, height - math.floor(width / target_aspect))
+
+
+def _add_direct_trim_to_crop_box(
+    image_size: tuple[int, int],
+    crop_box: tuple[int, int, int, int],
     *,
-    background_only: bool = False,
-    low_information_only: bool = False,
-) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int], int]:
-    if trim_request <= 0:
-        return left_crop_box, right_crop_box, 0
-
-    if background_only:
-        left_budget = measure_detected_background_margin(left_image, left_crop_box, "first", template_direction, edge_role)
-        right_budget = measure_detected_background_margin(right_image, right_crop_box, "second", template_direction, edge_role)
-    elif low_information_only:
-        left_budget = measure_low_information_edge_margin(left_image, left_crop_box, "first", template_direction, edge_role)
-        right_budget = measure_low_information_edge_margin(right_image, right_crop_box, "second", template_direction, edge_role)
-    else:
-        left_budget = max(
-            measure_detected_background_margin(left_image, left_crop_box, "first", template_direction, edge_role),
-            measure_low_information_edge_margin(left_image, left_crop_box, "first", template_direction, edge_role),
-        )
-        right_budget = max(
-            measure_detected_background_margin(right_image, right_crop_box, "second", template_direction, edge_role),
-            measure_low_information_edge_margin(right_image, right_crop_box, "second", template_direction, edge_role),
-        )
-
-    shared_trim = min(trim_request, left_budget, right_budget)
-    if shared_trim <= 0:
-        return left_crop_box, right_crop_box, 0
-
-    adjusted_left = add_edge_trim_to_crop_box(
-        left_image.size,
-        left_crop_box,
-        "first",
-        template_direction,
-        edge_role=edge_role,
-        trim_amount=shared_trim,
-    )
-    adjusted_right = add_edge_trim_to_crop_box(
-        right_image.size,
-        right_crop_box,
-        "second",
-        template_direction,
-        edge_role=edge_role,
-        trim_amount=shared_trim,
-    )
-    if not crop_box_is_safe(adjusted_left, left_image.size) or not crop_box_is_safe(adjusted_right, right_image.size):
-        return left_crop_box, right_crop_box, 0
-    return adjusted_left, adjusted_right, shared_trim
-
-
-def _apply_single_page_edge_trim_stage(
-    image,
-    crop_box: tuple[int, int, int, int],
-    page_position: str,
-    template_direction: str | None,
-    edge_role: str,
-    trim_request: int,
-) -> tuple[tuple[int, int, int, int], int]:
-    if trim_request <= 0:
-        return crop_box, 0
-
-    budget = max(
-        measure_detected_background_margin(image, crop_box, page_position, template_direction, edge_role),
-        measure_low_information_edge_margin(image, crop_box, page_position, template_direction, edge_role),
-    )
-    applied_trim = min(trim_request, budget)
-    if applied_trim <= 0:
-        return crop_box, 0
-
-    adjusted = add_edge_trim_to_crop_box(
-        image.size,
-        crop_box,
-        page_position,
-        template_direction,
-        edge_role=edge_role,
-        trim_amount=applied_trim,
-    )
-    if not crop_box_is_safe(adjusted, image.size):
-        return crop_box, 0
-    return adjusted, applied_trim
-
-
-def _trim_outer_preferred_margin(
-    image,
-    crop_box: tuple[int, int, int, int],
-    page_position: str,
-    template_direction: str | None,
-    dominant_ratio_threshold: float = KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO,
+    left_trim: int = 0,
+    top_trim: int = 0,
+    right_trim: int = 0,
+    bottom_trim: int = 0,
 ) -> tuple[int, int, int, int]:
-    trim_amount = measure_outer_preferred_edge_margin(
-        image,
-        crop_box,
-        page_position,
-        template_direction,
-        dominant_ratio_threshold=dominant_ratio_threshold,
+    left, top, right, bottom = crop_box
+    width, height = image_size
+    adjusted = (
+        max(0, min(width, left + max(0, left_trim))),
+        max(0, min(height, top + max(0, top_trim))),
+        max(0, min(width, right - max(0, right_trim))),
+        max(0, min(height, bottom - max(0, bottom_trim))),
     )
-    if trim_amount <= 0:
-        return crop_box
-    adjusted = add_edge_trim_to_crop_box(
-        image.size,
-        crop_box,
-        page_position,
-        template_direction,
-        edge_role="outer",
-        trim_amount=trim_amount,
-    )
-    if not crop_box_is_safe(adjusted, image.size):
+    if not _crop_box_has_area_inside(adjusted, image_size):
         return crop_box
     return adjusted
 
 
-def trim_crop_box_to_target_aspect(
+def _scaled_budget_by_retention(budget: int, retention_ratio: float) -> int:
+    if budget <= 0:
+        return 0
+    return max(0, min(budget, round(budget * _retention_to_trim_factor(retention_ratio))))
+
+
+def _split_trim_by_budget_legacy(required: int, first_budget: int, second_budget: int) -> tuple[int, int]:
+    if required <= 0:
+        return 0, 0
+
+    first_budget = max(0, first_budget)
+    second_budget = max(0, second_budget)
+    first = second = 0
+    if first_budget > 0 or second_budget > 0:
+        first_weight = first_budget * first_budget
+        second_weight = second_budget * second_budget
+        weight_total = first_weight + second_weight
+        if weight_total > 0:
+            first = min(first_budget, round(required * first_weight / weight_total))
+            second = min(second_budget, required - first)
+
+        remaining_budget = required - first - second
+        while remaining_budget > 0:
+            first_capacity = max(0, first_budget - first)
+            second_capacity = max(0, second_budget - second)
+            if first_capacity <= 0 and second_capacity <= 0:
+                break
+            if first_capacity >= second_capacity:
+                added = min(first_capacity, remaining_budget)
+                first += added
+            else:
+                added = min(second_capacity, remaining_budget)
+                second += added
+            remaining_budget -= added
+
+    remaining = required - first - second
+    if remaining > 0:
+        first += remaining
+    return first, second
+
+
+def _split_trim_by_budget(required: int, first_budget: int, second_budget: int) -> tuple[int, int]:
+    if required <= 0:
+        return 0, 0
+
+    first_budget = max(0, first_budget)
+    second_budget = max(0, second_budget)
+    available = first_budget + second_budget
+    if available <= 0:
+        return 0, 0
+
+    required = min(required, available)
+    first_weight = first_budget * first_budget
+    second_weight = second_budget * second_budget
+    weight_total = first_weight + second_weight
+    if weight_total <= 0:
+        return 0, 0
+
+    first = min(first_budget, round(required * first_weight / weight_total))
+    second = min(second_budget, required - first)
+
+    remaining = required - first - second
+    while remaining > 0:
+        first_capacity = first_budget - first
+        second_capacity = second_budget - second
+        if first_capacity <= 0 and second_capacity <= 0:
+            break
+        if first_capacity >= second_capacity:
+            added = min(first_capacity, remaining)
+            first += added
+        else:
+            added = min(second_capacity, remaining)
+            second += added
+        remaining -= added
+
+    return first, second
+
+
+def _facing_budget_crop_box_to_target_aspect(
+    image,
+    crop_box: tuple[int, int, int, int],
+    page_position: str,
+    template_direction: str | None,
+    target_size: tuple[int, int] | None,
+    outer_threshold: float,
+    inner_enabled: bool,
+    inner_threshold: float,
+) -> tuple[int, int, int, int]:
+    horizontal_required = _target_horizontal_trim_required(crop_box, target_size)
+    vertical_required = _target_vertical_trim_required(crop_box, target_size)
+    if horizontal_required <= 0 and vertical_required <= 0:
+        return crop_box
+
+    outer_edge, inner_edge = get_facing_page_horizontal_roles(page_position, template_direction)
+    outer_budget = _scaled_budget_by_retention(max(
+        measure_detected_background_margin(image, crop_box, page_position, template_direction, "outer"),
+        measure_low_information_edge_margin(
+            image,
+            crop_box,
+            page_position,
+            template_direction,
+            "outer",
+            dominant_ratio_threshold=KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO,
+        ),
+    ), outer_threshold)
+    inner_budget = 0
+    if inner_enabled:
+        inner_budget = _scaled_budget_by_retention(max(
+            measure_detected_background_margin(image, crop_box, page_position, template_direction, "inner"),
+            measure_low_information_edge_margin(
+                image,
+                crop_box,
+                page_position,
+                template_direction,
+                "inner",
+                dominant_ratio_threshold=KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO,
+            ),
+        ), inner_threshold)
+
+    outer_trim, _ = _split_trim_by_budget(horizontal_required, outer_budget, 0)
+    inner_trim = 0
+    remaining_horizontal = horizontal_required - outer_trim
+    if inner_enabled and remaining_horizontal > 0:
+        inner_trim, _ = _split_trim_by_budget(remaining_horizontal, inner_budget, 0)
+    left_trim = right_trim = 0
+    if outer_edge == "left":
+        left_trim += outer_trim
+    else:
+        right_trim += outer_trim
+    if inner_edge == "left":
+        left_trim += inner_trim
+    else:
+        right_trim += inner_trim
+
+    top_trim = bottom_trim = 0
+    if vertical_required > 0:
+        top_budget = _scaled_budget_by_retention(
+            measure_vertical_low_information_margin(
+                image,
+                crop_box,
+                "top",
+                KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO,
+            ),
+            outer_threshold,
+        )
+        bottom_budget = _scaled_budget_by_retention(
+            measure_vertical_low_information_margin(
+                image,
+                crop_box,
+                "bottom",
+                KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO,
+            ),
+            outer_threshold,
+        )
+        top_trim, bottom_trim = _split_trim_by_budget(vertical_required, top_budget, bottom_budget)
+
+    return _add_direct_trim_to_crop_box(
+        image.size,
+        crop_box,
+        left_trim=left_trim,
+        top_trim=top_trim,
+        right_trim=right_trim,
+        bottom_trim=bottom_trim,
+    )
+
+
+def _clamp_retention_ratio(value: float) -> float:
+    return max(
+        KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO_MIN,
+        min(KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO_MAX, value),
+    )
+
+
+def _target_ratio_frame_size(
+    crop_box: tuple[int, int, int, int],
+    target_size: tuple[int, int] | None,
+) -> tuple[int, int] | None:
+    left, top, right, bottom = crop_box
+    crop_width = right - left
+    crop_height = bottom - top
+    if crop_width <= 0 or crop_height <= 0:
+        return None
+    if target_size is None:
+        return crop_width, crop_height
+
+    target_width, target_height = target_size
+    if target_width <= 0 or target_height <= 0:
+        return crop_width, crop_height
+
+    target_aspect = target_width / target_height
+    crop_aspect = crop_width / crop_height
+    if crop_aspect > target_aspect:
+        frame_height = crop_height
+        frame_width = max(1, math.floor(frame_height * target_aspect))
+    else:
+        frame_width = crop_width
+        frame_height = max(1, math.floor(frame_width / target_aspect))
+
+    return min(frame_width, crop_width), min(frame_height, crop_height)
+
+
+def _retention_to_trim_factor(value: float) -> float:
+    retention = _clamp_retention_ratio(value)
+    if retention >= KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO_MAX:
+        return 0.0
+    span = KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO_MAX - KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO_MIN
+    if span <= 0:
+        return 0.0
+    return max(0.0, min(1.0, (KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO_MAX - retention) / span))
+
+
+def _scale_margins_by_factor(margins: CropMargins, factor: float) -> CropMargins:
+    return CropMargins(
+        left=round(margins.left * factor),
+        top=round(margins.top * factor),
+        right=round(margins.right * factor),
+        bottom=round(margins.bottom * factor),
+    )
+
+
+def _interpolate_crop_box_by_retention(
+    image_size: tuple[int, int],
+    crop_box: tuple[int, int, int, int],
+    retention_ratio: float,
+) -> tuple[int, int, int, int]:
+    factor = _retention_to_trim_factor(retention_ratio)
+    if factor <= 0:
+        return _full_image_crop_box(image_size)
+    margins = CropMargins.from_box(crop_box, image_size)
+    return _scale_margins_by_factor(margins, factor).to_box(image_size)
+
+
+def _build_facing_retention_crop_box(
     image_size: tuple[int, int],
     crop_box: tuple[int, int, int, int],
     page_position: str,
     template_direction: str | None,
-    target_size: tuple[int, int] | None,
+    outer_retention_ratio: float,
 ) -> tuple[int, int, int, int]:
-    if target_size is None:
-        return crop_box
+    width, height = image_size
+    margins = CropMargins.from_box(crop_box, image_size)
+    outer_margin, _ = get_outer_inner_horizontal_margins(margins, page_position, template_direction)
+    outer_factor = _retention_to_trim_factor(outer_retention_ratio)
 
-    target_width, target_height = target_size
-    if target_width <= 0 or target_height <= 0:
-        return crop_box
+    outer_ratio = round(outer_margin * outer_factor) / width if width > 0 else 0.0
+    top_ratio = round(margins.top * outer_factor) / height if height > 0 else 0.0
+    bottom_ratio = round(margins.bottom * outer_factor) / height if height > 0 else 0.0
+    return build_facing_crop_box(
+        image_size,
+        page_position,
+        template_direction,
+        outer_ratio=outer_ratio,
+        top_ratio=top_ratio,
+        bottom_ratio=bottom_ratio,
+        inner_ratio=0.0,
+    )
 
+
+def _candidate_positions(start: int, end: int, size: int) -> list[int]:
+    last = max(start, end - size)
+    travel = last - start
+    if travel <= 0:
+        return [start]
+
+    positions = {start, last, start + travel // 2}
+    steps = min(KCC_RATIO_FRAME_CANDIDATE_STEPS, max(1, travel))
+    for index in range(steps + 1):
+        positions.add(start + round(travel * index / steps))
+    return sorted(positions)
+
+
+def _build_information_integral(image):
+    Image, _, _ = load_pillow()
+    from PIL import ImageFilter
+
+    gray = image.convert("L")
+    background = detect_border_background(gray)
+    width, height = gray.size
+    scale = min(1.0, KCC_RATIO_FRAME_SCORE_SIZE / max(width, height))
+    if scale < 1.0:
+        resized_size = (max(1, round(width * scale)), max(1, round(height * scale)))
+        gray = gray.resize(resized_size, Image.Resampling.BILINEAR)
+
+    edges = gray.filter(ImageFilter.FIND_EDGES)
+    gray_pixels = gray.tobytes()
+    edge_pixels = edges.tobytes()
+    score_width, score_height = gray.size
+    row_stride = score_width + 1
+    integral = [0] * ((score_width + 1) * (score_height + 1))
+
+    for y in range(score_height):
+        row_total = 0
+        base = y * score_width
+        integral_base = (y + 1) * row_stride
+        previous_integral_base = y * row_stride
+        for x in range(score_width):
+            gray_value = gray_pixels[base + x]
+            edge_value = edge_pixels[base + x]
+            if background == "black":
+                tone_value = max(0, gray_value - 48)
+            elif background == "white":
+                tone_value = max(0, 220 - gray_value)
+            else:
+                tone_value = max(0, abs(gray_value - 128) - 48)
+            row_total += min(255, edge_value * 2 + tone_value)
+            integral[integral_base + x + 1] = integral[previous_integral_base + x + 1] + row_total
+
+    return integral, score_width, score_height
+
+
+def _scaled_region_sum(
+    integral: list[int],
+    score_width: int,
+    score_height: int,
+    image_size: tuple[int, int],
+    box: tuple[int, int, int, int],
+) -> int:
+    image_width, image_height = image_size
+    if image_width <= 0 or image_height <= 0:
+        return 0
+
+    left, top, right, bottom = box
+    x0 = max(0, min(score_width, round(left * score_width / image_width)))
+    y0 = max(0, min(score_height, round(top * score_height / image_height)))
+    x1 = max(x0, min(score_width, round(right * score_width / image_width)))
+    y1 = max(y0, min(score_height, round(bottom * score_height / image_height)))
+    row_stride = score_width + 1
+    return (
+        integral[y1 * row_stride + x1]
+        - integral[y0 * row_stride + x1]
+        - integral[y1 * row_stride + x0]
+        + integral[y0 * row_stride + x0]
+    )
+
+
+def _crop_box_has_area_inside(
+    crop_box: tuple[int, int, int, int],
+    image_size: tuple[int, int],
+) -> bool:
     left, top, right, bottom = crop_box
-    cropped_width = right - left
-    cropped_height = bottom - top
-    if cropped_width <= 0 or cropped_height <= 0:
+    width, height = image_size
+    return 0 <= left < right <= width and 0 <= top < bottom <= height
+
+
+def optimize_ratio_frame_crop_box(
+    image,
+    crop_box: tuple[int, int, int, int],
+    target_size: tuple[int, int] | None,
+    *,
+    page_position: str | None = None,
+    template_direction: str | None = None,
+    lock_inner: bool = False,
+    inner_retention_ratio: float = 1.0,
+    inner_trim_limit: int | None = None,
+) -> tuple[int, int, int, int]:
+    frame_size = _target_ratio_frame_size(crop_box, target_size)
+    if frame_size is None:
         return crop_box
 
-    target_aspect = target_width / target_height
-    current_aspect = cropped_width / cropped_height
-    if current_aspect <= target_aspect + KCC_FILL_TARGET_ASPECT_TOLERANCE:
+    frame_width, frame_height = frame_size
+    left, top, right, bottom = crop_box
+    if frame_width >= right - left and frame_height >= bottom - top:
         return crop_box
 
-    desired_width = max(1, math.floor(cropped_height * target_aspect))
-    excess_width = max(0, cropped_width - desired_width)
-    if excess_width <= 0:
+    x_positions = _candidate_positions(left, right, frame_width)
+    inner_weight = _clamp_retention_ratio(inner_retention_ratio)
+    if (lock_inner or inner_weight >= 0.99) and page_position is not None:
+        inner_edge = edge_name_for_role(page_position, template_direction, "inner")
+        if inner_edge == "left":
+            x_positions = [left]
+        else:
+            x_positions = [max(left, right - frame_width)]
+    elif page_position is not None:
+        inner_edge = edge_name_for_role(page_position, template_direction, "inner")
+        inner_factor = _retention_to_trim_factor(inner_weight)
+        if inner_trim_limit is not None:
+            allowed_inner_trim = inner_trim_limit
+        elif inner_edge == "left":
+            allowed_inner_trim = round(max(0, right - frame_width - left) * inner_factor)
+        else:
+            allowed_inner_trim = round(max(0, right - frame_width - left) * inner_factor)
+
+        if allowed_inner_trim <= 0:
+            if inner_edge == "left":
+                x_positions = [left]
+            else:
+                x_positions = [max(left, right - frame_width)]
+        else:
+            if inner_edge == "left":
+                x_positions = [x for x in x_positions if x - left <= allowed_inner_trim]
+                if not x_positions:
+                    x_positions = [left]
+            else:
+                x_positions = [x for x in x_positions if right - (x + frame_width) <= allowed_inner_trim]
+                if not x_positions:
+                    x_positions = [max(left, right - frame_width)]
+    else:
+        inner_edge = None
+    y_positions = _candidate_positions(top, bottom, frame_height)
+    inner_preserve_weight = max(
+        0.0,
+        (inner_weight - KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO_MIN)
+        / (KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO_MAX - KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO_MIN),
+    )
+    inner_preserve_weight *= inner_preserve_weight
+
+    integral, score_width, score_height = _build_information_integral(image)
+    source_score = _scaled_region_sum(integral, score_width, score_height, image.size, crop_box)
+    best_score: tuple[int, int, int] | None = None
+    best_box = crop_box
+
+    center_x = (left + right - frame_width) / 2
+    center_y = (top + bottom - frame_height) / 2
+    locked_inner_lost_score: int | None = None
+    max_inner_penalty = max(1, right - frame_width - left)
+    if inner_edge == "left":
+        locked_box = (left, top, left + frame_width, top + frame_height)
+        locked_inner_lost_score = source_score - _scaled_region_sum(
+            integral,
+            score_width,
+            score_height,
+            image.size,
+            locked_box,
+        )
+    elif inner_edge == "right":
+        locked_x = max(left, right - frame_width)
+        locked_box = (locked_x, top, locked_x + frame_width, top + frame_height)
+        locked_inner_lost_score = source_score - _scaled_region_sum(
+            integral,
+            score_width,
+            score_height,
+            image.size,
+            locked_box,
+        )
+
+    for y in y_positions:
+        for x in x_positions:
+            candidate = (x, y, x + frame_width, y + frame_height)
+            kept_score = _scaled_region_sum(integral, score_width, score_height, image.size, candidate)
+            lost_score = source_score - kept_score
+            center_penalty = int(abs(x - center_x) + abs(y - center_y))
+            inner_penalty = 0
+            if inner_edge == "left":
+                inner_penalty = max(0, x - left)
+            elif inner_edge == "right":
+                inner_penalty = max(0, right - (x + frame_width))
+            if inner_penalty > 0 and locked_inner_lost_score is not None:
+                movement_ratio = min(1.0, inner_penalty / max_inner_penalty)
+                improvement_ratio = (
+                    KCC_INNER_TRADEOFF_BASE_IMPROVEMENT
+                    + (KCC_INNER_TRADEOFF_FULL_IMPROVEMENT - KCC_INNER_TRADEOFF_BASE_IMPROVEMENT)
+                    * movement_ratio
+                )
+                required_gain = int(locked_inner_lost_score * improvement_ratio)
+                if lost_score > locked_inner_lost_score - required_gain:
+                    continue
+            score = (
+                lost_score + int(inner_penalty * inner_preserve_weight * 10000),
+                inner_penalty,
+                center_penalty,
+            )
+            if best_score is None or score < best_score:
+                best_score = score
+                best_box = candidate
+
+    if not _crop_box_has_area_inside(best_box, image.size):
+        return crop_box
+    return best_box
+
+
+def optimize_facing_spread_crop_box(
+    image,
+    crop_box: tuple[int, int, int, int],
+    target_size: tuple[int, int] | None,
+    page_position: str,
+    template_direction: str | None,
+    inner_enabled: bool,
+) -> tuple[int, int, int, int]:
+    frame_size = _target_ratio_frame_size(crop_box, target_size)
+    if frame_size is None:
+        return crop_box
+
+    frame_width, frame_height = frame_size
+    left, top, right, bottom = crop_box
+    if frame_width >= right - left and frame_height >= bottom - top:
         return crop_box
 
     outer_edge, inner_edge = get_facing_page_horizontal_roles(page_position, template_direction)
-    inner_trim = 0
-    outer_trim = excess_width
+    horizontal_required = max(0, right - left - frame_width)
+    outer_budget = measure_low_information_edge_budget(
+        image,
+        crop_box,
+        page_position,
+        template_direction,
+        "outer",
+        horizontal_required,
+    )
+    inner_budget = 0
+    if inner_enabled:
+        inner_budget = measure_low_information_edge_budget(
+            image,
+            crop_box,
+            page_position,
+            template_direction,
+            "inner",
+            horizontal_required,
+        )
+    top_budget = measure_vertical_low_information_margin(
+        image,
+        crop_box,
+        "top",
+        KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO,
+    )
+    bottom_budget = measure_vertical_low_information_margin(
+        image,
+        crop_box,
+        "bottom",
+        KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO,
+    )
 
-    trim_left = 0
-    trim_right = 0
-    if inner_edge == "left":
-        trim_left += inner_trim
+    x_positions = _candidate_positions(left, right, frame_width)
+    if not inner_enabled:
+        x_positions = [left if inner_edge == "left" else max(left, right - frame_width)]
     else:
-        trim_right += inner_trim
-    if outer_edge == "left":
-        trim_left += outer_trim
-    else:
-        trim_right += outer_trim
+        inner_limit_x = (
+            left + inner_budget
+            if inner_edge == "left"
+            else right - frame_width - inner_budget
+        )
+        x_positions = sorted(set(x_positions + [max(left, min(right - frame_width, inner_limit_x))]))
+    y_positions = _candidate_positions(top, bottom, frame_height)
 
-    adjusted = (left + trim_left, top, right - trim_right, bottom)
-    if not crop_box_is_safe(adjusted, image_size):
+    integral, score_width, score_height = _build_information_integral(image)
+    source_score = _scaled_region_sum(integral, score_width, score_height, image.size, crop_box)
+    center_x = (left + right - frame_width) / 2
+    center_y = (top + bottom - frame_height) / 2
+    best_score: tuple[int, int, int, int] | None = None
+    best_box = crop_box
+
+    for y in y_positions:
+        for x in x_positions:
+            candidate = (x, y, x + frame_width, y + frame_height)
+            left_trim = x - left
+            right_trim = right - (x + frame_width)
+            top_trim = y - top
+            bottom_trim = bottom - (y + frame_height)
+            outer_trim = left_trim if outer_edge == "left" else right_trim
+            inner_trim = left_trim if inner_edge == "left" else right_trim
+            if inner_enabled and inner_trim > inner_budget:
+                continue
+            horizontal_over_budget = max(0, outer_trim - outer_budget)
+            if inner_enabled:
+                horizontal_over_budget += max(0, inner_trim - inner_budget)
+            else:
+                horizontal_over_budget += inner_trim
+            vertical_over_budget = max(0, top_trim - top_budget) + max(0, bottom_trim - bottom_budget)
+            kept_score = _scaled_region_sum(integral, score_width, score_height, image.size, candidate)
+            lost_score = source_score - kept_score
+            center_penalty = int(abs(x - center_x) + abs(y - center_y))
+            score = (
+                horizontal_over_budget + vertical_over_budget,
+                lost_score,
+                inner_trim if inner_enabled else 0,
+                center_penalty,
+            )
+            if best_score is None or score < best_score:
+                best_score = score
+                best_box = candidate
+
+    if not _crop_box_has_area_inside(best_box, image.size):
         return crop_box
-    return adjusted
+    return best_box
 
 
-def align_facing_crop_boxes_to_target_aspect(
-    left_image,
-    left_crop_box: tuple[int, int, int, int],
-    right_image,
-    right_crop_box: tuple[int, int, int, int],
+def trim_smart_crop_box_to_target_aspect(
+    image,
+    crop_box: tuple[int, int, int, int],
+    target_size: tuple[int, int] | None,
+    edge_threshold: float = KCC_CROP_STRENGTH_DEFAULT,
+) -> tuple[int, int, int, int]:
+    crop_box = _interpolate_crop_box_by_retention(image.size, crop_box, edge_threshold)
+    return optimize_ratio_frame_crop_box(
+        image,
+        crop_box,
+        target_size,
+    )
+
+
+def trim_facing_crop_box_to_target_aspect(
+    image,
+    crop_box: tuple[int, int, int, int],
+    page_position: str,
     template_direction: str | None,
     target_size: tuple[int, int] | None,
-) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
-    return (
-        trim_crop_box_to_target_aspect(left_image.size, left_crop_box, "first", template_direction, target_size),
-        trim_crop_box_to_target_aspect(right_image.size, right_crop_box, "second", template_direction, target_size),
+    outer_threshold: float = KCC_CROP_STRENGTH_DEFAULT,
+    inner_enabled: bool = False,
+    inner_threshold: float = KCC_CROP_STRENGTH_DEFAULT,
+) -> tuple[int, int, int, int]:
+    return optimize_facing_spread_crop_box(
+        image,
+        crop_box,
+        target_size,
+        page_position=page_position,
+        template_direction=template_direction,
+        inner_enabled=inner_enabled,
     )
 
 
@@ -1441,6 +2064,8 @@ def align_facing_crop_boxes_to_shared_size(
     right_size: tuple[int, int],
     right_crop_box: tuple[int, int, int, int] | None,
     template_direction: str | None,
+    left_page_position: str = "first",
+    right_page_position: str = "second",
 ) -> tuple[tuple[int, int, int, int] | None, tuple[int, int, int, int] | None]:
     if left_crop_box is None or right_crop_box is None:
         return left_crop_box, right_crop_box
@@ -1454,8 +2079,8 @@ def align_facing_crop_boxes_to_shared_size(
         return left_crop_box, right_crop_box
 
     shared_size = (target_width, target_height)
-    aligned_left = _expand_crop_box_to_size(left_size, left_crop_box, "first", template_direction, shared_size)
-    aligned_right = _expand_crop_box_to_size(right_size, right_crop_box, "second", template_direction, shared_size)
+    aligned_left = _expand_crop_box_to_size(left_size, left_crop_box, left_page_position, template_direction, shared_size)
+    aligned_right = _expand_crop_box_to_size(right_size, right_crop_box, right_page_position, template_direction, shared_size)
     if _crop_box_size(aligned_left) != _crop_box_size(aligned_right):
         return left_crop_box, right_crop_box
     return aligned_left, aligned_right
@@ -1489,6 +2114,8 @@ def build_facing_fill_crop_boxes(
     right_size: tuple[int, int],
     right_crop_box: tuple[int, int, int, int] | None,
     template_direction: str | None,
+    left_page_position: str = "first",
+    right_page_position: str = "second",
 ) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
     if left_crop_box is not None and right_crop_box is not None:
         synchronized_left, synchronized_right = synchronize_facing_crop_boxes(
@@ -1497,13 +2124,15 @@ def build_facing_fill_crop_boxes(
             right_size,
             right_crop_box,
             template_direction,
+            left_page_position=left_page_position,
+            right_page_position=right_page_position,
         )
         if synchronized_left is not None and synchronized_right is not None:
             return synchronized_left, synchronized_right
 
     return (
-        _build_facing_fill_fallback_box(left_size, left_crop_box, "first", template_direction),
-        _build_facing_fill_fallback_box(right_size, right_crop_box, "second", template_direction),
+        _build_facing_fill_fallback_box(left_size, left_crop_box, left_page_position, template_direction),
+        _build_facing_fill_fallback_box(right_size, right_crop_box, right_page_position, template_direction),
     )
 
 
@@ -1514,86 +2143,34 @@ def maybe_add_facing_fill_trim(
     right_crop_box: tuple[int, int, int, int] | None,
     template_direction: str | None,
     target_size: tuple[int, int] | None,
-    edge_threshold: float = KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO,
+    edge_threshold: float = KCC_CROP_STRENGTH_DEFAULT,
+    inner_enabled: bool = False,
+    inner_edge_threshold: float = KCC_CROP_STRENGTH_DEFAULT,
+    left_page_position: str = "first",
+    right_page_position: str = "second",
 ) -> tuple[tuple[int, int, int, int] | None, tuple[int, int, int, int] | None]:
     if left_crop_box is None or right_crop_box is None:
         return left_crop_box, right_crop_box
 
-    current_left = left_crop_box
-    current_right = right_crop_box
-
-    for edge_role, background_only, low_information_only in (
-        ("outer", True, False),
-        ("inner", True, False),
-        ("outer", False, True),
-        ("inner", False, True),
-    ):
-        _, _, shared_required = _remaining_height_fill_trim(current_left, current_right, target_size)
-        if shared_required <= 0:
-            break
-        current_left, current_right, _ = _apply_shared_edge_trim_stage(
-            left_image,
-            current_left,
-            right_image,
-            current_right,
-            template_direction,
-            edge_role,
-            shared_required,
-            background_only=background_only,
-            low_information_only=low_information_only,
-        )
-
-    current_left, current_right = align_facing_crop_boxes_to_target_aspect(
+    current_left = trim_facing_crop_box_to_target_aspect(
         left_image,
-        current_left,
-        right_image,
-        current_right,
+        left_crop_box,
+        left_page_position,
         template_direction,
         target_size,
+        outer_threshold=edge_threshold,
+        inner_enabled=inner_enabled,
+        inner_threshold=inner_edge_threshold,
     )
-
-    left_required, right_required, _ = _remaining_height_fill_trim(current_left, current_right, target_size)
-    if left_required > 0:
-        for edge_role in ("outer", "inner"):
-            current_left, _ = _apply_single_page_edge_trim_stage(
-                left_image,
-                current_left,
-                "first",
-                template_direction,
-                edge_role,
-                left_required,
-            )
-            left_required = compute_inner_trim_needed_for_height_fill(current_left, target_size)
-            if left_required <= 0:
-                break
-
-    if right_required > 0:
-        for edge_role in ("outer", "inner"):
-            current_right, _ = _apply_single_page_edge_trim_stage(
-                right_image,
-                current_right,
-                "second",
-                template_direction,
-                edge_role,
-                right_required,
-            )
-            right_required = compute_inner_trim_needed_for_height_fill(current_right, target_size)
-            if right_required <= 0:
-                break
-
-    current_left = _trim_outer_preferred_margin(
-        left_image,
-        current_left,
-        "first",
-        template_direction,
-        dominant_ratio_threshold=edge_threshold,
-    )
-    current_right = _trim_outer_preferred_margin(
+    current_right = trim_facing_crop_box_to_target_aspect(
         right_image,
-        current_right,
-        "second",
+        right_crop_box,
+        right_page_position,
         template_direction,
-        dominant_ratio_threshold=edge_threshold,
+        target_size,
+        outer_threshold=edge_threshold,
+        inner_enabled=inner_enabled,
+        inner_threshold=inner_edge_threshold,
     )
 
     current_left, current_right = align_facing_crop_boxes_to_shared_size(
@@ -1602,13 +2179,15 @@ def maybe_add_facing_fill_trim(
         right_image.size,
         current_right,
         template_direction,
+        left_page_position=left_page_position,
+        right_page_position=right_page_position,
     )
 
     return current_left, current_right
 
 
 def is_spread_crop_mode(crop_mode: str) -> bool:
-    return normalize_crop_mode(crop_mode) in {"spread-safe", "spread-fill"}
+    return normalize_crop_mode(crop_mode) == "spread-fill"
 
 
 def synchronize_facing_crop_boxes(
@@ -1617,6 +2196,8 @@ def synchronize_facing_crop_boxes(
     right_size: tuple[int, int],
     right_crop_box: tuple[int, int, int, int] | None,
     template_direction: str | None,
+    left_page_position: str = "first",
+    right_page_position: str = "second",
 ) -> tuple[tuple[int, int, int, int] | None, tuple[int, int, int, int] | None]:
     if left_crop_box is None or right_crop_box is None:
         return None, None
@@ -1627,8 +2208,8 @@ def synchronize_facing_crop_boxes(
     left_width, left_height = left_size
     right_width, right_height = right_size
 
-    left_outer, _ = get_outer_inner_horizontal_margins(left_margins, "first", template_direction)
-    right_outer, _ = get_outer_inner_horizontal_margins(right_margins, "second", template_direction)
+    left_outer, _ = get_outer_inner_horizontal_margins(left_margins, left_page_position, template_direction)
+    right_outer, _ = get_outer_inner_horizontal_margins(right_margins, right_page_position, template_direction)
 
     shared_top_ratio = min(left_margins.top / left_height, right_margins.top / right_height)
     shared_bottom_ratio = min(left_margins.bottom / left_height, right_margins.bottom / right_height)
@@ -1636,7 +2217,7 @@ def synchronize_facing_crop_boxes(
 
     synchronized_left = build_facing_crop_box(
         left_size,
-        "first",
+        left_page_position,
         template_direction,
         outer_ratio=shared_outer_ratio,
         top_ratio=shared_top_ratio,
@@ -1645,7 +2226,7 @@ def synchronize_facing_crop_boxes(
     )
     synchronized_right = build_facing_crop_box(
         right_size,
-        "second",
+        right_page_position,
         template_direction,
         outer_ratio=shared_outer_ratio,
         top_ratio=shared_top_ratio,
@@ -1664,12 +2245,15 @@ def synchronize_facing_crop_boxes(
         right_size,
         synchronized_right,
         template_direction,
+        left_page_position=left_page_position,
+        right_page_position=right_page_position,
     )
 
 
 def build_smart_crop_box(
     image,
     target_size: tuple[int, int] | None = None,
+    edge_threshold: float = KCC_CROP_STRENGTH_DEFAULT,
 ) -> tuple[int, int, int, int] | None:
     _, _, ImageStat = load_pillow()
     gray = image.convert("L")
@@ -1697,20 +2281,34 @@ def build_smart_crop_box(
     cropped_gray = cropped.convert("L")
     edge_means = [ImageStat.Stat(cropped_gray.crop(box)).mean[0] for box in edge_boxes]
     if background == "white" and (min(edge_means) >= 215 or sum(value >= 225 for value in edge_means) >= 3):
-        adjusted = expand_crop_box_towards_target_aspect(crop_box, image.size, target_size)
+        adjusted = trim_smart_crop_box_to_target_aspect(
+            image,
+            crop_box,
+            target_size,
+            edge_threshold=edge_threshold,
+        )
         if adjusted == (0, 0, image.size[0], image.size[1]):
             return None
         return adjusted
     if background == "black" and (max(edge_means) <= 40 or sum(value <= 30 for value in edge_means) >= 3):
-        adjusted = expand_crop_box_towards_target_aspect(crop_box, image.size, target_size)
+        adjusted = trim_smart_crop_box_to_target_aspect(
+            image,
+            crop_box,
+            target_size,
+            edge_threshold=edge_threshold,
+        )
         if adjusted == (0, 0, image.size[0], image.size[1]):
             return None
         return adjusted
     return None
 
 
-def smart_crop_image(image, target_size: tuple[int, int] | None = None):
-    crop_box = build_smart_crop_box(image, target_size=target_size)
+def smart_crop_image(
+    image,
+    target_size: tuple[int, int] | None = None,
+    edge_threshold: float = KCC_CROP_STRENGTH_DEFAULT,
+):
+    crop_box = build_smart_crop_box(image, target_size=target_size, edge_threshold=edge_threshold)
     if crop_box is None:
         return image
     cropped = apply_crop_box(image, crop_box)
@@ -1788,7 +2386,11 @@ def save_processed_image(
     horizontal_anchor: HorizontalAnchor = "center",
 ) -> None:
     if normalize_crop_mode(options.crop_mode) == "smart":
-        image = smart_crop_image(image, target_size=options.target_size)
+        image = smart_crop_image(
+            image,
+            target_size=options.target_size,
+            edge_threshold=options.crop_edge_threshold,
+        )
 
     image = apply_luminance_operations(image, options)
 
@@ -1822,13 +2424,21 @@ def process_kcc_spread_group(
     options: ImageProcessingOptions,
     template_direction: str | None,
     allow_inner_white_fill: bool = False,
+    page_positions: tuple[str, ...] | None = None,
 ) -> None:
     if len(input_paths) != len(output_paths):
         raise ValueError("输入页数与输出页数不匹配。")
     if not input_paths:
         return
+    page_positions = page_positions or tuple("first" if index == 0 else "second" for index in range(len(input_paths)))
     if len(input_paths) == 1:
-        process_single_image(input_paths[0], output_paths[0], options)
+        process_kcc_facing_single_page(
+            input_paths[0],
+            output_paths[0],
+            options,
+            template_direction=template_direction,
+            page_position=page_positions[0],
+        )
         return
 
     loaded_images = [load_source_image(path) for path in input_paths]
@@ -1842,6 +2452,8 @@ def process_kcc_spread_group(
                     loaded_images[1].size,
                     crop_boxes[1],
                     template_direction,
+                    left_page_position=page_positions[0],
+                    right_page_position=page_positions[1],
                 )
             )
             synchronized_boxes = list(
@@ -1853,6 +2465,10 @@ def process_kcc_spread_group(
                     template_direction,
                     options.target_size,
                     edge_threshold=options.spread_fill_edge_threshold,
+                    inner_enabled=options.spread_fill_inner_enabled,
+                    inner_edge_threshold=options.spread_fill_inner_edge_threshold,
+                    left_page_position=page_positions[0],
+                    right_page_position=page_positions[1],
                 )
             )
         else:
@@ -1863,10 +2479,11 @@ def process_kcc_spread_group(
                     loaded_images[1].size,
                     crop_boxes[1],
                     template_direction,
+                    left_page_position=page_positions[0],
+                    right_page_position=page_positions[1],
                 )
             )
 
-        page_positions = ("first", "second")
         for image, crop_box, output_path, page_position in zip(
             loaded_images,
             synchronized_boxes,
@@ -1905,6 +2522,17 @@ def process_kcc_facing_single_page(
             page_position=page_position,
             template_direction=template_direction,
         )
+        if normalize_crop_mode(options.crop_mode) == "spread-fill" and outer_only_crop_box is not None:
+            outer_only_crop_box = trim_facing_crop_box_to_target_aspect(
+                image,
+                outer_only_crop_box,
+                page_position,
+                template_direction,
+                options.target_size,
+                outer_threshold=options.spread_fill_edge_threshold,
+                inner_enabled=options.spread_fill_inner_enabled,
+                inner_threshold=options.spread_fill_inner_edge_threshold,
+            )
         processed = apply_crop_box(image, outer_only_crop_box)
         try:
             save_processed_image(
@@ -1920,60 +2548,168 @@ def process_kcc_facing_single_page(
         image.close()
 
 
+@dataclass(frozen=True)
+class PreprocessGroup:
+    slots: tuple[LayoutPageSlot, ...]
+    input_paths: tuple[Path, ...]
+    output_paths: tuple[Path, ...]
+
+
+def build_preprocess_groups(
+    image_paths: list[Path],
+    processed_root: Path,
+    options: ImageProcessingOptions,
+    shift_first_page: bool,
+) -> list[PreprocessGroup]:
+    groups: list[PreprocessGroup] = []
+    output_index = 1
+
+    if is_spread_crop_mode(options.crop_mode):
+        page_groups = build_layout_page_groups(
+            len(image_paths),
+            shift_blank_count=1 if shift_first_page and image_paths else 0,
+            page_layout="facing",
+        )
+        for page_group in page_groups:
+            source_slots = tuple(slot for slot in page_group if slot.source_index is not None)
+            if not source_slots:
+                continue
+            output_paths = tuple(
+                processed_root / f"{output_index + offset:05d}.jpg"
+                for offset in range(len(source_slots))
+            )
+            groups.append(
+                PreprocessGroup(
+                    slots=source_slots,
+                    input_paths=tuple(image_paths[slot.source_index] for slot in source_slots if slot.source_index is not None),
+                    output_paths=output_paths,
+                )
+            )
+            output_index += len(source_slots)
+        return groups
+
+    for index, image_path in enumerate(image_paths, start=1):
+        slot = LayoutPageSlot(
+            page_number=index,
+            page_position="first",
+            source_index=index - 1,
+            is_shift_blank=False,
+        )
+        groups.append(
+            PreprocessGroup(
+                slots=(slot,),
+                input_paths=(image_path,),
+                output_paths=(processed_root / f"{index:05d}.jpg",),
+            )
+        )
+    return groups
+
+
+def process_preprocess_group(
+    group: PreprocessGroup,
+    options: ImageProcessingOptions,
+    template_direction: str | None,
+) -> None:
+    if is_spread_crop_mode(options.crop_mode):
+        page_positions = tuple(slot.page_position for slot in group.slots)
+        if len(group.input_paths) == 1:
+            process_kcc_facing_single_page(
+                group.input_paths[0],
+                group.output_paths[0],
+                options,
+                template_direction=template_direction,
+                page_position=page_positions[0],
+            )
+            return
+        process_kcc_spread_group(
+            list(group.input_paths),
+            list(group.output_paths),
+            options,
+            template_direction=template_direction,
+            allow_inner_white_fill=normalize_crop_mode(options.crop_mode) == "spread-fill",
+            page_positions=page_positions,
+        )
+        return
+
+    process_single_image(group.input_paths[0], group.output_paths[0], options)
+
+
 def preprocess_images(
     image_paths: list[Path],
     options: ImageProcessingOptions,
     shift_first_page: bool = False,
     template_direction: str | None = None,
+    progress_callback: BuildProgressCallback | None = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> tuple[list[Path], Path | None]:
+    raise_if_build_cancelled(stop_requested)
     if not options.enabled:
         return image_paths, None
 
     processed_root = Path(".analysis") / "tmp" / f"processed_{uuid.uuid4().hex}"
     processed_root.mkdir(parents=True, exist_ok=True)
-    processed_paths: list[Path] = []
     try:
-        if is_spread_crop_mode(options.crop_mode):
-            output_index = 1
-            page_groups = build_layout_page_groups(
-                len(image_paths),
-                shift_blank_count=1 if shift_first_page and image_paths else 0,
-                page_layout="facing",
-            )
-            for page_group in page_groups:
-                source_slots = [slot for slot in page_group if slot.source_index is not None]
-                spread_paths = [image_paths[slot.source_index] for slot in source_slots]
-                spread_output_paths = [
-                    processed_root / f"{output_index + offset:05d}.jpg"
-                    for offset in range(len(spread_paths))
-                ]
-                if len(source_slots) == 1:
-                    process_kcc_facing_single_page(
-                        spread_paths[0],
-                        spread_output_paths[0],
-                        options,
-                        template_direction=template_direction,
-                        page_position=source_slots[0].page_position,
+        groups = build_preprocess_groups(image_paths, processed_root, options, shift_first_page)
+        worker_count = max(1, min(int(options.preprocessing_workers), len(groups)))
+        total_pages = sum(len(group.output_paths) for group in groups)
+        completed_pages = 0
+        if progress_callback is not None:
+            progress_callback(
+                BuildStageProgress(
+                    "ui.progress.preprocess.images",
+                    completed_pages,
+                    total_pages,
+                    workers=worker_count,
+                )
+        )
+        if worker_count == 1:
+            for group in groups:
+                raise_if_build_cancelled(stop_requested)
+                process_preprocess_group(group, options, template_direction)
+                completed_pages += len(group.output_paths)
+                if progress_callback is not None:
+                    progress_callback(
+                        BuildStageProgress(
+                            "ui.progress.preprocess.images",
+                            completed_pages,
+                            total_pages,
+                            current_name=group.input_paths[-1].name,
+                            workers=worker_count,
+                        )
                     )
-                else:
-                    process_kcc_spread_group(
-                        spread_paths,
-                        spread_output_paths,
-                        options,
-                        template_direction=template_direction,
-                        allow_inner_white_fill=normalize_crop_mode(options.crop_mode) == "spread-fill",
-                    )
-                processed_paths.extend(spread_output_paths)
-                output_index += len(spread_paths)
+                raise_if_build_cancelled(stop_requested)
         else:
-            for index, image_path in enumerate(image_paths, start=1):
-                processed_path = processed_root / f"{index:05d}.jpg"
-                process_single_image(image_path, processed_path, options)
-                processed_paths.append(processed_path)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = {
+                    executor.submit(process_preprocess_group, group, options, template_direction): group
+                    for group in groups
+                }
+                try:
+                    for future in concurrent.futures.as_completed(futures):
+                        raise_if_build_cancelled(stop_requested)
+                        future.result()
+                        group = futures[future]
+                        completed_pages += len(group.output_paths)
+                        if progress_callback is not None:
+                            progress_callback(
+                                BuildStageProgress(
+                                    "ui.progress.preprocess.images",
+                                    completed_pages,
+                                    total_pages,
+                                    current_name=group.input_paths[-1].name,
+                                    workers=worker_count,
+                                )
+                            )
+                        raise_if_build_cancelled(stop_requested)
+                except BuildCancelled:
+                    for pending in futures:
+                        pending.cancel()
+                    raise
     except Exception:
         shutil.rmtree(processed_root, ignore_errors=True)
         raise
 
+    processed_paths = [output_path for group in groups for output_path in group.output_paths]
     return processed_paths, processed_root
 
 
@@ -2022,11 +2758,26 @@ def resolve_image_processing_options(args: argparse.Namespace) -> ImageProcessin
     return ImageProcessingOptions(
         target_size=target_size,
         crop_mode=crop_mode,
+        crop_edge_threshold=max(
+            KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO_MIN,
+            min(
+                KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO_MAX,
+                float(getattr(args, "crop_edge_threshold", KCC_CROP_STRENGTH_DEFAULT)),
+            ),
+        ),
         spread_fill_edge_threshold=max(
             KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO_MIN,
             min(
                 KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO_MAX,
-                float(getattr(args, "spread_fill_edge_threshold", KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO)),
+                float(getattr(args, "spread_fill_edge_threshold", KCC_CROP_STRENGTH_DEFAULT)),
+            ),
+        ),
+        spread_fill_inner_enabled=bool(getattr(args, "spread_fill_inner_enabled", False)),
+        spread_fill_inner_edge_threshold=max(
+            KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO_MIN,
+            min(
+                KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO_MAX,
+                float(getattr(args, "spread_fill_inner_edge_threshold", KCC_CROP_STRENGTH_DEFAULT)),
             ),
         ),
         preserve_color=preserve_color,
@@ -2035,6 +2786,7 @@ def resolve_image_processing_options(args: argparse.Namespace) -> ImageProcessin
         autocontrast=autocontrast,
         autolevel=autolevel,
         jpeg_quality=jpeg_quality,
+        preprocessing_workers=resolve_preprocessing_workers(getattr(args, "performance_mode", "balanced")),
     )
 
 
@@ -2990,7 +3742,10 @@ def build_kpf(
     image_processing: ImageProcessingOptions | None = None,
     shift_first_page: bool = False,
     layout_options: LayoutOptions | None = None,
+    progress_callback: BuildProgressCallback | None = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> BuildResult:
+    raise_if_build_cancelled(stop_requested)
     if not input_dir.is_dir():
         raise FileNotFoundError(f"输入目录不存在：{input_dir}")
 
@@ -3003,6 +3758,15 @@ def build_kpf(
     image_paths = find_input_images(input_dir)
     if not image_paths:
         raise ValueError("输入目录中没有找到 JPG/PNG 图片。")
+    if progress_callback is not None:
+        progress_callback(
+            BuildStageProgress(
+                "ui.progress.collect.images",
+                len(image_paths),
+                len(image_paths),
+                current_name=input_dir.name,
+            )
+        )
 
     resolved_title = resolve_title(input_dir, title)
     temp_root = Path(".analysis") / "tmp"
@@ -3016,10 +3780,24 @@ def build_kpf(
             effective_image_processing,
             shift_first_page=shift_first_page,
             template_direction=effective_template_assets.template_direction,
+            progress_callback=progress_callback,
+            stop_requested=stop_requested,
         )
+        raise_if_build_cancelled(stop_requested)
         image_infos = inspect_image_infos(effective_image_paths)
+        raise_if_build_cancelled(stop_requested)
+        if progress_callback is not None:
+            progress_callback(
+                BuildStageProgress(
+                    "ui.progress.inspect.images",
+                    len(effective_image_paths),
+                    len(effective_image_paths),
+                    current_name=input_dir.name,
+                )
+            )
         shift_blank_count = 0
         if shift_first_page:
+            raise_if_build_cancelled(stop_requested)
             effective_image_paths, image_infos, processed_root = prepend_shift_blank(
                 effective_image_paths,
                 image_infos,
@@ -3028,12 +3806,23 @@ def build_kpf(
             )
             shift_blank_count = 1
 
+        raise_if_build_cancelled(stop_requested)
         spreads, pages = build_volume_plan(
             effective_image_paths,
             image_infos,
             shift_blank_count=shift_blank_count,
             page_layout=effective_layout.page_layout,
         )
+        raise_if_build_cancelled(stop_requested)
+        if progress_callback is not None:
+            progress_callback(
+                BuildStageProgress(
+                    "ui.progress.build.layout",
+                    len(pages),
+                    len(pages),
+                    current_name=input_dir.name,
+                )
+            )
         book_kdf_bytes = write_book_kdf(
             output_path=temp_kdf_path,
             template_assets=effective_template_assets,
@@ -3042,6 +3831,7 @@ def build_kpf(
             pages=pages,
             layout_options=effective_layout,
         )
+        raise_if_build_cancelled(stop_requested)
         manifest_bytes = effective_template_assets.manifest_bytes or build_manifest()
         action_log_bytes = build_action_log()
         journal_bytes = b""
@@ -3053,18 +3843,62 @@ def build_kpf(
             action_log_bytes=action_log_bytes,
             journal_bytes=journal_bytes,
         )
+        raise_if_build_cancelled(stop_requested)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("book.kcb", book_kcb_bytes)
-            archive.writestr("action.log", action_log_bytes)
-            for page in pages:
-                archive.write(page.input_path, page.book_filename)
-            archive.writestr("resources/ManifestFile", manifest_bytes)
-            archive.writestr("resources/book.kdf", book_kdf_bytes)
-            archive.writestr("resources/book.kdf-journal", journal_bytes)
-            for page in pages:
-                archive.write(page.input_path, f"resources/res/{page.resource_id}")
+        archive_total = len(pages) * 2 + 6
+        archive_current = 0
+
+        def report_archive_progress(current_name: str = "") -> None:
+            if progress_callback is None:
+                return
+            progress_callback(
+                BuildStageProgress(
+                    "ui.progress.write.kpf",
+                    archive_current,
+                    archive_total,
+                    current_name=current_name,
+                )
+            )
+
+        report_archive_progress(output_path.name)
+        try:
+            with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                raise_if_build_cancelled(stop_requested)
+                archive.writestr("book.kcb", book_kcb_bytes)
+                archive_current += 1
+                report_archive_progress("book.kcb")
+                raise_if_build_cancelled(stop_requested)
+                archive.writestr("action.log", action_log_bytes)
+                archive_current += 1
+                report_archive_progress("action.log")
+                for page in pages:
+                    raise_if_build_cancelled(stop_requested)
+                    archive.write(page.input_path, page.book_filename, compress_type=zipfile.ZIP_STORED)
+                    archive_current += 1
+                    report_archive_progress(page.input_path.name)
+                raise_if_build_cancelled(stop_requested)
+                archive.writestr("resources/ManifestFile", manifest_bytes)
+                archive_current += 1
+                report_archive_progress("ManifestFile")
+                raise_if_build_cancelled(stop_requested)
+                archive.writestr("resources/book.kdf", book_kdf_bytes)
+                archive_current += 1
+                report_archive_progress("book.kdf")
+                raise_if_build_cancelled(stop_requested)
+                archive.writestr("resources/book.kdf-journal", journal_bytes)
+                archive_current += 1
+                report_archive_progress("book.kdf-journal")
+                for page in pages:
+                    raise_if_build_cancelled(stop_requested)
+                    archive.write(page.input_path, f"resources/res/{page.resource_id}", compress_type=zipfile.ZIP_STORED)
+                    archive_current += 1
+                    report_archive_progress(page.input_path.name)
+                archive_current += 1
+                report_archive_progress(output_path.name)
+        except BuildCancelled:
+            output_path.unlink(missing_ok=True)
+            raise
 
         panel_label = "off"
         if effective_layout.virtual_panels:
@@ -3176,6 +4010,11 @@ def build_batch(
         executor_label = "线程"
 
     print(f"批量并行: {worker_count} 个{executor_label}")
+    worker_image_processing = (
+        replace(image_processing, preprocessing_workers=1)
+        if image_processing is not None
+        else None
+    )
     with executor:
         future_to_subdir = {
             executor.submit(
@@ -3183,7 +4022,7 @@ def build_batch(
                 template_assets,
                 subdir,
                 resolved_output_dir / f"{subdir.name}.kpf",
-                image_processing,
+                worker_image_processing,
                 shift_first_page,
                 layout_options,
                 emit_kfx,
@@ -3253,7 +4092,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--jobs",
         type=int,
         default=1,
-        help="批量模式并行卷数；1 为串行，>1 时按卷启用多进程。",
+        help="批量模式并行任务数；1 为串行，>1 时按卷启用多进程。",
+    )
+    parser.add_argument(
+        "--performance-mode",
+        type=parse_performance_mode,
+        default="balanced",
+        metavar="{eco,balanced,max}",
+        help="单卷图片预处理性能模式：eco 串行，balanced 约半数核心，max 尽量吃满 CPU。",
     )
     parser.add_argument(
         "--emit-kfx",
@@ -3306,15 +4152,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--crop-mode",
         type=parse_crop_mode,
-        metavar="{off,smart,spread-safe,spread-fill}",
+        metavar="{off,smart,spread-fill}",
         default="off",
-        help="图像裁边模式，off 为关闭，smart 为单页保守裁边，spread-safe 为双页联动裁边，spread-fill 为在安全前提下可裁内侧白边的双页联动裁边；旧的 kcc-* 名称仍兼容。",
+        help="图像裁边模式：off 为关闭，smart 为智能单页裁边，spread-fill 为双页联动裁边。",
+    )
+    parser.add_argument(
+        "--crop-edge-threshold",
+        type=float,
+        default=KCC_CROP_STRENGTH_DEFAULT,
+        help="智能单页保留比例，范围 0.70-1.00；1.00 表示使用满足目标比例的最大裁切框。",
     )
     parser.add_argument(
         "--spread-fill-edge-threshold",
         type=float,
-        default=KCC_FILL_OUTER_LOW_INFO_DOMINANT_RATIO,
-        help="spread-fill 外侧空白判定阈值，范围 0.70-1.00；越高越保守，越低越容易裁掉低信息边缘。",
+        default=KCC_CROP_STRENGTH_DEFAULT,
+        help="双页联动外边保留比例，范围 0.70-1.00；越高越接近原图。",
+    )
+    parser.add_argument(
+        "--spread-fill-inner-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="双页联动裁边是否允许裁切内边。",
+    )
+    parser.add_argument(
+        "--spread-fill-inner-edge-threshold",
+        type=float,
+        default=KCC_CROP_STRENGTH_DEFAULT,
+        help="双页联动内边保留比例，范围 0.70-1.00；越高越保护中缝。",
     )
     parser.add_argument(
         "--target-size",

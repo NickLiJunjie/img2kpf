@@ -36,6 +36,7 @@ SquircleCard {
 
     cardRadius: theme ? theme.radiusStage : 24
     cardColor: theme ? theme.surfaceBase : "#FFFFFF"
+    strokeColor: theme ? theme.lineSoft : "#E5E5EA"
 
     ColumnLayout {
         anchors.fill: parent

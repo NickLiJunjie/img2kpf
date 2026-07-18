@@ -243,7 +243,7 @@ ApplicationWindow {
         title: window.uiText("ui.kfx.plugin")
         currentFolder: window.value("kfxPluginDialogFolder", "")
         nameFilters: ["Zip Archive (*.zip)", "All Files (*)"]
-        onAccepted: controller.setKfxPlugin(selectedFile.toString())
+        onAccepted: controller.importKfxPlugin(selectedFile.toString())
     }
 
     FolderDialog {
@@ -996,6 +996,7 @@ ApplicationWindow {
                                 theme: theme
                                 motion: motion
                                 label: window.uiText("ui.title.settings")
+                                metaText: window.value("titleEffectSummary", "")
 
                                 CheckBox {
                                     id: customTitleCheck
@@ -1042,6 +1043,7 @@ ApplicationWindow {
                                     motion: motion
                                     text: window.value("title", "")
                                     placeholderText: window.value("inputMode", "") === "batch" ? window.uiText("ui.series.name") : window.uiText("ui.title")
+                                    onTextEdited: controller.setTitle(text)
                                     onEditingFinished: controller.setTitle(text)
                                 }
 
@@ -1052,6 +1054,7 @@ ApplicationWindow {
                                     motion: motion
                                     text: window.value("volumeTitleTemplate", "")
                                     placeholderText: window.uiText("ui.volume.title.template")
+                                    onTextEdited: controller.setVolumeTitleTemplate(text)
                                     onEditingFinished: controller.setVolumeTitleTemplate(text)
                                 }
                             }
@@ -1076,6 +1079,17 @@ ApplicationWindow {
                                 options: window.value("imageStyleOptions", [])
                                 value: window.value("imageStyle", "")
                                 onSelected: value => controller.setImageStyle(value)
+                            }
+
+                            OptionRow {
+                                Layout.fillWidth: true
+                                theme: theme
+                                motion: motion
+                                labelWidth: window.inspectorLabelWidth
+                                label: window.uiText("ui.preserve.color")
+                                options: window.value("preserveColorOptions", [])
+                                value: window.value("preserveColor", "")
+                                onSelected: value => controller.setOption("preserve_color", value)
                             }
 
                             Text {
@@ -1151,15 +1165,85 @@ ApplicationWindow {
                                 theme: theme
                                 motion: motion
                                 labelWidth: window.inspectorLabelWidth
-                                visible: window.value("spreadFillEdgeThresholdEnabled", false)
-                                label: window.uiText("ui.spread.fill.edge.threshold")
+                                visible: window.value("cropEdgeThresholdEnabled", false)
+                                label: window.uiText("ui.crop.edge.threshold")
                                 from: 0.70
                                 to: 1.00
                                 stepSize: 0.01
-                                value: window.value("spreadFillEdgeThreshold", 0.96)
+                                value: window.value("cropEdgeThreshold", 1.00)
+                                displayValue: value.toFixed(2)
+                                onValueEdited: value => controller.setCropEdgeThreshold(value)
+                                onResetClicked: controller.resetCropEdgeThreshold()
+                            }
+
+                            SliderRow {
+                                Layout.fillWidth: true
+                                theme: theme
+                                motion: motion
+                                labelWidth: window.inspectorLabelWidth
+                                visible: false
+                                label: window.uiText("ui.spread.outer.edge.threshold")
+                                from: 0.70
+                                to: 1.00
+                                stepSize: 0.01
+                                value: window.value("spreadFillEdgeThreshold", 0.90)
                                 displayValue: value.toFixed(2)
                                 onValueEdited: value => controller.setSpreadFillEdgeThreshold(value)
                                 onResetClicked: controller.resetSpreadFillEdgeThreshold()
+                            }
+
+                            CheckBox {
+                                id: spreadInnerCropCheck
+                                Layout.fillWidth: true
+                                visible: window.value("spreadFillEdgeThresholdEnabled", false)
+                                text: window.uiText("ui.spread.inner.crop")
+                                checked: window.value("spreadFillInnerEnabled", false)
+                                spacing: 8
+                                onToggled: controller.setSpreadFillInnerEnabled(checked)
+
+                                indicator: Rectangle {
+                                    x: spreadInnerCropCheck.leftPadding
+                                    y: parent.height / 2 - height / 2
+                                    width: 18
+                                    height: 18
+                                    radius: 5
+                                    color: spreadInnerCropCheck.checked ? theme.accentPrimary : theme.surfaceBase
+                                    border.color: spreadInnerCropCheck.checked ? theme.accentPrimary : theme.lineSubtle
+                                    border.width: 1
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "✓"
+                                        color: "#FFFFFF"
+                                        font.pixelSize: 13
+                                        font.weight: Font.Bold
+                                        visible: spreadInnerCropCheck.checked
+                                    }
+                                }
+
+                                contentItem: Text {
+                                    text: spreadInnerCropCheck.text
+                                    color: theme.textPrimary
+                                    font.pixelSize: 14
+                                    verticalAlignment: Text.AlignVCenter
+                                    leftPadding: spreadInnerCropCheck.indicator.width + spreadInnerCropCheck.spacing
+                                }
+                            }
+
+                            SliderRow {
+                                Layout.fillWidth: true
+                                theme: theme
+                                motion: motion
+                                labelWidth: window.inspectorLabelWidth
+                                visible: false
+                                label: window.uiText("ui.spread.inner.edge.threshold")
+                                from: 0.70
+                                to: 1.00
+                                stepSize: 0.01
+                                value: window.value("spreadFillInnerEdgeThreshold", 0.90)
+                                displayValue: value.toFixed(2)
+                                onValueEdited: value => controller.setSpreadFillInnerEdgeThreshold(value)
+                                onResetClicked: controller.resetSpreadFillInnerEdgeThreshold()
                             }
 
                             OptionRow {
@@ -1320,11 +1404,12 @@ ApplicationWindow {
                                             anchors.fill: parent
                                             hoverEnabled: true
                                             acceptedButtons: Qt.NoButton
-                                            enabled: !splitSpreadsButtonHost.splitAvailable
+                                            visible: !splitSpreadsButtonHost.splitAvailable
+                                            enabled: visible
                                             cursorShape: Qt.ForbiddenCursor
                                         }
 
-                                        ToolTip.visible: !splitSpreadsButtonHost.splitAvailable && splitDisabledHover.containsMouse
+                                        ToolTip.visible: splitDisabledHover.visible && splitDisabledHover.containsMouse
                                         ToolTip.delay: 260
                                         ToolTip.text: window.value("splitSpreadsToolTip", "")
                                     }
@@ -1340,8 +1425,208 @@ ApplicationWindow {
                             expanded: window.advancedExpanded
                             onToggleRequested: expanded => {
                                 window.advancedExpanded = expanded
-                                if (expanded)
-                                    window.revealSectionAfterExpand(advancedSection)
+                            }
+
+                            Item {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 44
+
+                                RowLayout {
+                                    anchors.fill: parent
+                                    spacing: theme.space12
+
+                                    Text {
+                                        text: window.uiText("ui.kfx.plugin")
+                                        color: theme.textSecondary
+                                        font.pixelSize: 13
+                                        font.weight: Font.Medium
+                                        Layout.preferredWidth: window.inspectorLabelWidth
+                                        horizontalAlignment: Text.AlignRight
+                                        verticalAlignment: Text.AlignVCenter
+                                        elide: Text.ElideRight
+                                    }
+
+                                    Rectangle {
+                                        Layout.preferredWidth: 88
+                                        Layout.preferredHeight: 32
+                                        radius: 16
+                                        color: {
+                                            const status = window.value("kfxPluginStatus", "missing")
+                                            if (status === "ready")
+                                                return theme.successSoft
+                                            if (status === "external")
+                                                return theme.accentSoft
+                                            return theme.bgSubtle
+                                        }
+                                        border.color: {
+                                            const status = window.value("kfxPluginStatus", "missing")
+                                            if (status === "ready")
+                                                return theme.successPrimary
+                                            if (status === "external")
+                                                return theme.accentPrimary
+                                            return theme.lineSubtle
+                                        }
+                                        border.width: 1
+
+                                        RowLayout {
+                                            anchors.centerIn: parent
+                                            spacing: 5
+
+                                            Text {
+                                                visible: window.value("kfxPluginStatus", "missing") !== "missing"
+                                                text: "✓"
+                                                color: window.value("kfxPluginStatus", "missing") === "ready" ? theme.successPrimary : theme.accentPrimary
+                                                font.pixelSize: 12
+                                                font.weight: Font.DemiBold
+                                            }
+
+                                            Text {
+                                                text: window.value("kfxPluginStatusText", "")
+                                                color: {
+                                                    const status = window.value("kfxPluginStatus", "missing")
+                                                    if (status === "ready")
+                                                        return theme.successPrimary
+                                                    if (status === "external")
+                                                        return theme.accentPrimary
+                                                    return theme.textTertiary
+                                                }
+                                                font.pixelSize: 12
+                                                font.weight: Font.DemiBold
+                                            }
+                                        }
+
+                                        MouseArea {
+                                            id: kfxPluginStatusHover
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            acceptedButtons: Qt.NoButton
+                                        }
+
+                                        ToolTip.visible: kfxPluginStatusHover.containsMouse
+                                        ToolTip.delay: 420
+                                        ToolTip.text: window.value("kfxPluginDisplayText", "")
+                                    }
+
+                                    IconButton {
+                                        theme: theme
+                                        motion: motion
+                                        buttonSize: 36
+                                        iconSize: 19
+                                        iconSource: Qt.resolvedUrl("../../assets/gui/icons/folder.svg")
+                                        toolTipText: window.uiText("ui.action.import.kfx.plugin")
+                                        onClicked: kfxPluginDialog.open()
+                                    }
+
+                                    IconButton {
+                                        theme: theme
+                                        motion: motion
+                                        buttonSize: 36
+                                        iconSize: 19
+                                        iconSource: Qt.resolvedUrl("../../assets/gui/icons/open_output.svg")
+                                        toolTipText: window.uiText("ui.action.open.kfx.plugin.location")
+                                        enabled: window.canOpenPathLocation("kfx")
+                                        onClicked: controller.openPathLocation("kfx")
+                                    }
+
+                                    IconButton {
+                                        theme: theme
+                                        motion: motion
+                                        buttonSize: 36
+                                        iconSize: 18
+                                        symbol: "×"
+                                        toolTipText: window.uiText("ui.action.remove.kfx.plugin")
+                                        enabled: window.value("kfxPluginImported", false)
+                                        onClicked: controller.removeKfxPlugin()
+                                    }
+                                }
+
+                                DropArea {
+                                    id: kfxPluginDropArea
+                                    anchors.fill: parent
+                                    onDropped: drop => {
+                                        if (drop.urls.length > 0) {
+                                            controller.importKfxPlugin(drop.urls[0].toString())
+                                        }
+                                    }
+                                }
+
+                                Item {
+                                    anchors.fill: parent
+                                    visible: kfxPluginDropArea.containsDrag
+                                    z: 10
+
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        radius: theme.radiusControl
+                                        color: theme.dark ? Qt.rgba(0.08, 0.09, 0.11, 0.84) : Qt.rgba(1, 1, 1, 0.78)
+                                    }
+
+                                    Canvas {
+                                        anchors.fill: parent
+                                        onPaint: {
+                                            const ctx = getContext("2d")
+                                            const inset = 1
+                                            const radius = theme.radiusControl
+                                            const w = width - inset * 2
+                                            const h = height - inset * 2
+                                            ctx.clearRect(0, 0, width, height)
+                                            ctx.strokeStyle = String(theme.accentPrimary)
+                                            ctx.lineWidth = 1.5
+                                            ctx.setLineDash([7, 5])
+                                            ctx.beginPath()
+                                            ctx.moveTo(inset + radius, inset)
+                                            ctx.lineTo(inset + w - radius, inset)
+                                            ctx.quadraticCurveTo(inset + w, inset, inset + w, inset + radius)
+                                            ctx.lineTo(inset + w, inset + h - radius)
+                                            ctx.quadraticCurveTo(inset + w, inset + h, inset + w - radius, inset + h)
+                                            ctx.lineTo(inset + radius, inset + h)
+                                            ctx.quadraticCurveTo(inset, inset + h, inset, inset + h - radius)
+                                            ctx.lineTo(inset, inset + radius)
+                                            ctx.quadraticCurveTo(inset, inset, inset + radius, inset)
+                                            ctx.stroke()
+                                        }
+                                        onWidthChanged: requestPaint()
+                                        onHeightChanged: requestPaint()
+                                        Component.onCompleted: requestPaint()
+                                    }
+
+                                    RowLayout {
+                                        anchors.centerIn: parent
+                                        spacing: theme.space8
+
+                                        Rectangle {
+                                            Layout.preferredWidth: 24
+                                            Layout.preferredHeight: 24
+                                            radius: 12
+                                            color: theme.accentPrimary
+
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: "+"
+                                                color: "#FFFFFF"
+                                                font.pixelSize: 18
+                                                font.weight: Font.DemiBold
+                                            }
+                                        }
+
+                                        ColumnLayout {
+                                            spacing: 0
+
+                                            Text {
+                                                text: window.uiText("ui.kfx.plugin.drop.active")
+                                                color: theme.textPrimary
+                                                font.pixelSize: 13
+                                                font.weight: Font.DemiBold
+                                            }
+
+                                            Text {
+                                                text: window.uiText("ui.kfx.plugin.drop.subtitle")
+                                                color: theme.textTertiary
+                                                font.pixelSize: 11
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
                             OptionRow {
@@ -1349,156 +1634,30 @@ ApplicationWindow {
                                 theme: theme
                                 motion: motion
                                 labelWidth: window.inspectorLabelWidth
-                                label: window.uiText("ui.preserve.color")
-                                options: window.value("triStateOptions", [])
-                                value: window.value("preserveColor", "")
-                                onSelected: value => controller.setOption("preserve_color", value)
+                                label: window.uiText("ui.performance.mode")
+                                options: window.value("performanceModeOptions", [])
+                                value: window.value("performanceMode", "balanced")
+                                onSelected: value => controller.setOption("performance_mode", value)
                             }
 
                             RowLayout {
                                 Layout.fillWidth: true
-                                spacing: theme.space12
+                                visible: false
+                                spacing: 0
 
-                                Text {
-                                    text: window.uiText("ui.template.file")
-                                    color: theme.textSecondary
-                                    font.pixelSize: 13
-                                    font.weight: Font.Medium
-                                    Layout.preferredWidth: window.inspectorLabelWidth
-                                    horizontalAlignment: Text.AlignRight
-                                    verticalAlignment: Text.AlignVCenter
-                                    elide: Text.ElideRight
-                                }
-
-                                TextEntry {
+                                SliderRow {
                                     Layout.fillWidth: true
                                     theme: theme
                                     motion: motion
-                                    text: window.value("templatePath", "")
-                                    revealEnd: true
-                                    placeholderText: window.uiText("ui.optional.template.kpf.zip")
-                                    onEditingFinished: controller.setTemplatePath(text)
-                                }
-
-                                IconButton {
-                                    theme: theme
-                                    motion: motion
-                                    buttonSize: 36
-                                    iconSize: 19
-                                    iconSource: Qt.resolvedUrl("../../assets/gui/icons/folder.svg")
-                                    toolTipText: window.uiText("ui.action.choose.template.file")
-                                    onClicked: templateDialog.open()
-                                }
-
-                                IconButton {
-                                    theme: theme
-                                    motion: motion
-                                    buttonSize: 36
-                                    iconSize: 19
-                                    iconSource: Qt.resolvedUrl("../../assets/gui/icons/open_output.svg")
-                                    toolTipText: window.uiText("ui.action.open.template.location")
-                                    enabled: window.canOpenPathLocation("template")
-                                    onClicked: controller.openPathLocation("template")
-                                }
-                            }
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: theme.space12
-
-                                Text {
-                                    text: window.uiText("ui.kfx.plugin")
-                                    color: theme.textSecondary
-                                    font.pixelSize: 13
-                                    font.weight: Font.Medium
-                                    Layout.preferredWidth: window.inspectorLabelWidth
-                                    horizontalAlignment: Text.AlignRight
-                                    verticalAlignment: Text.AlignVCenter
-                                    elide: Text.ElideRight
-                                }
-
-                                TextEntry {
-                                    Layout.fillWidth: true
-                                    theme: theme
-                                    motion: motion
-                                    text: window.value("kfxPlugin", "")
-                                    revealEnd: true
-                                    placeholderText: window.uiText("ui.kfx.plugin.load.prompt")
-                                    onEditingFinished: controller.setKfxPlugin(text)
-                                }
-
-                                IconButton {
-                                    theme: theme
-                                    motion: motion
-                                    buttonSize: 36
-                                    iconSize: 19
-                                    iconSource: Qt.resolvedUrl("../../assets/gui/icons/folder.svg")
-                                    toolTipText: window.uiText("ui.action.choose.kfx.plugin")
-                                    onClicked: kfxPluginDialog.open()
-                                }
-
-                                IconButton {
-                                    theme: theme
-                                    motion: motion
-                                    buttonSize: 36
-                                    iconSize: 19
-                                    iconSource: Qt.resolvedUrl("../../assets/gui/icons/open_output.svg")
-                                    toolTipText: window.uiText("ui.action.open.kfx.plugin.location")
-                                    enabled: window.canOpenPathLocation("kfx")
-                                    onClicked: controller.openPathLocation("kfx")
-                                }
-                            }
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                visible: window.value("jobsEnabled", false)
-                                spacing: theme.space12
-
-                                Text {
-                                    text: window.uiText("ui.parallel.volumes")
-                                    color: theme.textSecondary
-                                    font.pixelSize: 13
-                                    font.weight: Font.Medium
-                                    Layout.preferredWidth: window.inspectorLabelWidth
-                                    horizontalAlignment: Text.AlignRight
-                                    verticalAlignment: Text.AlignVCenter
-                                    elide: Text.ElideRight
-                                }
-
-                                SpinBox {
-                                    id: jobsSpin
-                                    Layout.fillWidth: true
-                                    editable: true
-                                    from: 1
-                                    to: 64
-                                    value: window.value("jobs", 1)
-                                    implicitHeight: 36
-
-                                    onValueModified: controller.setJobs(value)
-
-                                    contentItem: TextInput {
-                                        text: jobsSpin.textFromValue(jobsSpin.value, jobsSpin.locale)
-                                        font.pixelSize: 13
-                                        font.weight: Font.DemiBold
-                                        color: theme.textPrimary
-                                        horizontalAlignment: TextInput.AlignLeft
-                                        verticalAlignment: TextInput.AlignVCenter
-                                        leftPadding: 12
-                                        rightPadding: 12
-                                        readOnly: !jobsSpin.editable
-                                        validator: jobsSpin.validator
-                                        inputMethodHints: Qt.ImhFormattedNumbersOnly
-                                    }
-
-                                    up.indicator: Item {}
-                                    down.indicator: Item {}
-
-                                    background: Rectangle {
-                                        radius: theme.radiusControl
-                                        color: theme.surfaceBase
-                                        border.color: jobsSpin.activeFocus ? theme.accentPrimary : theme.lineSubtle
-                                        border.width: 1
-                                    }
+                                    labelWidth: window.inspectorLabelWidth
+                                    label: window.uiText("ui.parallel.volumes")
+                                    from: window.value("jobsMin", 1)
+                                    to: window.value("jobsMax", 16)
+                                    stepSize: 1
+                                    value: window.value("jobs", window.value("jobsDefault", 5))
+                                    displayValue: Math.round(value).toString()
+                                    onValueEdited: value => controller.setJobs(Math.round(value))
+                                    onResetClicked: controller.setJobs(window.value("jobsDefault", 5))
                                 }
                             }
                         }
@@ -1512,8 +1671,6 @@ ApplicationWindow {
                             contentSpacing: theme.space8
                             onToggleRequested: expanded => {
                                 window.profilesSectionExpanded = expanded
-                                if (expanded)
-                                    window.revealSectionAfterExpand(profilesSection)
                             }
 
                             RowLayout {
@@ -1818,7 +1975,7 @@ ApplicationWindow {
             id: taskPanel
             readonly property string runState: window.value("runState", "setup")
             Layout.fillWidth: true
-            Layout.preferredHeight: 118
+            Layout.preferredHeight: 138
             theme: theme
             cardRadius: theme.radiusCard
 
@@ -1867,8 +2024,16 @@ ApplicationWindow {
                         }
 
                         Text {
-                            text: window.value("runProgressText", "—")
+                            text: window.value("runProgressPercentText", "")
                             visible: window.value("runProgressValue", 0) > 0 || window.value("isRunning", false)
+                            color: theme.textTertiary
+                            font.pixelSize: 12
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+
+                        Text {
+                            text: window.value("runElapsedText", "")
+                            visible: text.length > 0
                             color: theme.textTertiary
                             font.pixelSize: 12
                             Layout.alignment: Qt.AlignVCenter
@@ -1915,7 +2080,7 @@ ApplicationWindow {
 
                     Text {
                         Layout.fillWidth: true
-                        text: window.value("logText", "")
+                        text: window.value("runDetailText", "") || window.value("logText", "")
                         visible: text.length > 0
                         color: theme.textTertiary
                         font.pixelSize: 12

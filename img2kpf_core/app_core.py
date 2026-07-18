@@ -4,14 +4,19 @@ import argparse
 import concurrent.futures
 import contextlib
 import io
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from pathlib import Path
+from threading import Lock
 from typing import Callable, Literal
 
 from .i18n import encode_i18n_message
 from .kfx_direct import convert_kpf_to_kfx
 from .kpf_generator import (
+    BuildCancelled,
     BuildResult,
+    BuildProgressCallback,
+    BuildStageProgress,
     LayoutOptions,
     build_kpf,
     build_parser,
@@ -20,11 +25,13 @@ from .kpf_generator import (
     load_bundled_template_assets,
     load_template_assets,
     normalize_crop_mode,
+    normalize_performance_mode,
     normalize_image_preset,
     parse_size,
     resolve_image_processing_options,
+    resolve_parallel_jobs,
 )
-from .plugin_registry import DEFAULT_KFX_PLUGIN_ID
+from .plugin_registry import DEFAULT_KFX_PLUGIN_ID, resolve_plugin_archive
 
 
 InputMode = Literal["single", "batch", "invalid", "empty"]
@@ -85,6 +92,11 @@ class RunProgress:
     current_name: str = ""
     successes: int = 0
     failures: int = 0
+    detail_current: int = 0
+    detail_total: int = 0
+    detail_text: str = ""
+    workers: int = 1
+    indeterminate: bool = False
 
 
 @dataclass(frozen=True)
@@ -108,10 +120,13 @@ class AppRunConfig:
     panel_movement: str = "vertical"
     image_preset: str = "bright"
     crop_mode: str = "off"
-    spread_fill_edge_threshold: float = 0.96
+    crop_edge_threshold: float = 1.00
+    spread_fill_edge_threshold: float = 1.00
+    spread_fill_inner_enabled: bool = False
+    spread_fill_inner_edge_threshold: float = 1.00
     target_size_text: str = ""
     scribe_panel: bool = True
-    preserve_color: TriStateValue = "auto"
+    preserve_color: TriStateValue = "enabled"
     gamma_value: float = 1.8
     gamma_auto: bool = True
     contrast_value: float = 1.0
@@ -123,7 +138,8 @@ class AppRunConfig:
     emit_kfx: bool = False
     output_format: str = "kpf"
     kfx_plugin: str = DEFAULT_KFX_PLUGIN_ID
-    jobs: int = 1
+    jobs: int = 5
+    performance_mode: str = "balanced"
 
 
 @dataclass(frozen=True)
@@ -151,6 +167,7 @@ def _tooltip_key_map() -> dict[str, str]:
         "template": "ui.tip.template",
         "kfx_plugin": "ui.tip.kfx.plugin",
         "jobs": "ui.tip.jobs",
+        "performance_mode": "ui.tip.performance.mode",
         "reading_direction": "ui.tip.reading.direction",
         "page_layout": "ui.tip.page.layout",
         "virtual_panels": "ui.tip.virtual.panels",
@@ -235,13 +252,36 @@ def should_keep_kpf(config: AppRunConfig) -> bool:
     return normalize_output_format(config) != "kfx_only"
 
 
-def suggest_output_location(input_dir: Path, mode: InputMode, output_format: str = "kpf") -> Path | None:
-    output_dir = input_dir / f"{input_dir.name}_{output_directory_suffix(output_format)}"
+def suggest_output_location(
+    input_dir: Path,
+    mode: InputMode,
+    output_format: str = "kpf",
+    output_name: str | None = None,
+) -> Path | None:
+    return _suggest_output_location(input_dir, mode, output_format, output_name or input_dir.name)
+
+
+def _suggest_output_location(
+    input_dir: Path,
+    mode: InputMode,
+    output_format: str = "kpf",
+    output_name: str | None = None,
+) -> Path | None:
+    base_name = sanitize_output_filename(output_name or input_dir.name, fallback=input_dir.name)
+    output_dir = input_dir / f"{base_name}_{output_directory_suffix(output_format)}"
     if mode == "single":
-        return output_dir / f"{input_dir.name}{primary_output_suffix(output_format)}"
+        return output_dir / f"{base_name}{primary_output_suffix(output_format)}"
     if mode == "batch":
         return output_dir
     return None
+
+
+def sanitize_output_filename(value: str, fallback: str = "output") -> str:
+    normalized = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', " ", value).strip()
+    normalized = re.sub(r"\s+", " ", normalized)
+    normalized = normalized.rstrip(" .")
+    fallback_normalized = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', " ", fallback).strip().rstrip(" .")
+    return normalized or fallback_normalized or "output"
 
 
 def detect_input_mode(
@@ -330,7 +370,10 @@ def build_image_processing_options(config: AppRunConfig):
     namespace = argparse.Namespace(
         image_preset=normalize_image_preset(config.image_preset),
         crop_mode=normalize_crop_mode(config.crop_mode),
+        crop_edge_threshold=config.crop_edge_threshold,
         spread_fill_edge_threshold=config.spread_fill_edge_threshold,
+        spread_fill_inner_enabled=config.spread_fill_inner_enabled,
+        spread_fill_inner_edge_threshold=config.spread_fill_inner_edge_threshold,
         target_size=target_size,
         scribe_panel=config.scribe_panel,
         preserve_color=tristate_to_bool(config.preserve_color),
@@ -339,6 +382,7 @@ def build_image_processing_options(config: AppRunConfig):
         autocontrast=tristate_to_bool(config.autocontrast),
         autolevel=tristate_to_bool(config.autolevel),
         jpeg_quality=None if config.jpeg_quality_auto else config.jpeg_quality_value,
+        performance_mode=normalize_performance_mode(config.performance_mode),
     )
     return resolve_image_processing_options(namespace)
 
@@ -350,6 +394,30 @@ def build_layout_options(config: AppRunConfig) -> LayoutOptions:
         virtual_panels=config.virtual_panels,
         panel_movement=config.panel_movement,
     )
+
+
+def _build_stage_fraction(stage: BuildStageProgress) -> float:
+    phase = stage.phase
+    stage_progress = 1.0
+    if stage.total > 0:
+        stage_progress = max(0.0, min(1.0, stage.current / stage.total))
+    if phase == "ui.progress.collect.images":
+        return 0.02 * stage_progress
+    if phase == "ui.progress.preprocess.images":
+        return 0.02 + 0.50 * stage_progress
+    if phase == "ui.progress.inspect.images":
+        return 0.52 + 0.05 * stage_progress
+    if phase == "ui.progress.build.layout":
+        return 0.57 + 0.08 * stage_progress
+    if phase == "ui.progress.write.kpf":
+        return 0.65 + 0.35 * stage_progress
+    return stage_progress
+
+
+def _build_detail_text(stage: BuildStageProgress) -> str:
+    if stage.workers > 1 and stage.phase == "ui.progress.preprocess.images":
+        return _msg("ui.progress.worker.count", workers=stage.workers)
+    return ""
 
 
 def validate_run_config(config: AppRunConfig) -> DetectionResult:
@@ -380,7 +448,10 @@ def validate_run_config(config: AppRunConfig) -> DetectionResult:
         raise ValueError(_msg("ui.epub.mobi.generation.not.available.please.choose"))
 
     if should_emit_kfx(config) and not config.kfx_plugin.strip():
-        raise ValueError(_msg("ui.error.kfx.plugin.required"))
+        try:
+            resolve_plugin_archive(None)
+        except Exception:
+            raise ValueError(_msg("ui.error.kfx.plugin.required")) from None
     if config.jobs < 1:
         raise ValueError(_msg("ui.error.jobs.must.be.positive"))
     if not config.gamma_auto and config.gamma_value <= 0:
@@ -420,7 +491,12 @@ def resolve_output_location(config: AppRunConfig, mode: InputMode) -> Path:
     if config.output_location.strip():
         return Path(config.output_location).expanduser()
 
-    suggested = suggest_output_location(input_dir, mode, normalize_output_format(config))
+    suggested = _suggest_output_location(
+        input_dir,
+        mode,
+        normalize_output_format(config),
+        _default_output_base_name(config, input_dir),
+    )
     if suggested is None:
         raise ValueError(_msg("ui.error.output.location.unavailable"))
     return suggested
@@ -482,6 +558,7 @@ def execute_run(
             log=log,
             status=status,
             progress=progress,
+            should_stop=should_stop,
             pause_if_requested=pause_if_requested,
         )
 
@@ -510,72 +587,129 @@ def _execute_single_run(
     log: Callable[[str], None],
     status: Callable[[str], None],
     progress: Callable[[RunProgress], None],
+    should_stop: Callable[[], bool],
     pause_if_requested: Callable[[], None],
 ) -> RunSummary:
     emit_kfx = should_emit_kfx(config)
     keep_kpf = should_keep_kpf(config)
     build_output_path = output_path if keep_kpf else output_path.with_suffix(".kpf")
-    total_steps = 2 if emit_kfx else 1
-    pause_if_requested()
-    status(_msg("ui.generating.single.volume.kpf" if keep_kpf else "ui.generating.temporary.single.volume.kpf"))
-    progress(
-        RunProgress(
-            mode="single",
-            phase=_msg("ui.generating.kpf" if keep_kpf else "ui.generating.temporary.kpf"),
-            current=1,
-            total=total_steps,
-            current_name=input_dir.name,
-        )
-    )
-    result = _capture_console_output(
-        log,
-        build_kpf,
-        template_assets=template_assets,
-        input_dir=input_dir,
-        output_path=build_output_path,
-        title=config.title.strip() if config.custom_title_enabled and config.title.strip() else None,
-        image_processing=image_processing,
-        shift_first_page=config.shift,
-        layout_options=layout_options,
-    )
+    total_units = 1000
+    kpf_units = 780 if emit_kfx else total_units
+    last_progress_units = 0
 
-    if emit_kfx:
-        pause_if_requested()
-        status(_msg("ui.generating.kfx"))
+    def report_build_progress(stage: BuildStageProgress) -> None:
+        nonlocal last_progress_units
+        fraction = _build_stage_fraction(stage)
+        last_progress_units = round(kpf_units * fraction)
         progress(
             RunProgress(
                 mode="single",
-                phase=_msg("ui.generating.kfx"),
-                current=2,
-                total=total_steps,
+                phase=_msg(stage.phase),
+                current=last_progress_units,
+                total=total_units,
+                current_name=stage.current_name or input_dir.name,
+                detail_current=stage.current,
+                detail_total=stage.total,
+                detail_text=_build_detail_text(stage),
+                workers=stage.workers,
+                indeterminate=stage.indeterminate,
+            )
+        )
+
+    try:
+        pause_if_requested()
+        if should_stop():
+            raise BuildCancelled("ui.task.cancelled")
+        status(_msg("ui.generating.single.volume.kpf" if keep_kpf else "ui.generating.temporary.single.volume.kpf"))
+        progress(
+            RunProgress(
+                mode="single",
+                phase=_msg("ui.generating.kpf" if keep_kpf else "ui.generating.temporary.kpf"),
+                current=0,
+                total=total_units,
                 current_name=input_dir.name,
             )
         )
-        kfx_result = _capture_console_output(
+        result = _capture_console_output(
             log,
-            convert_kpf_to_kfx,
-            result.output_path,
-            output_path if not keep_kpf else None,
-            plugin_ref=config.kfx_plugin.strip(),
+            build_kpf,
+            template_assets=template_assets,
+            input_dir=input_dir,
+            output_path=build_output_path,
+            title=config.title.strip() if config.custom_title_enabled and config.title.strip() else None,
+            image_processing=image_processing,
+            shift_first_page=config.shift,
+            layout_options=layout_options,
+            progress_callback=report_build_progress,
+            stop_requested=should_stop,
         )
-        if keep_kpf:
-            result.kfx_output_path = kfx_result.kfx_path
-        else:
+
+        if emit_kfx:
+            pause_if_requested()
+            if should_stop():
+                raise BuildCancelled("ui.task.cancelled")
+            status(_msg("ui.generating.kfx"))
+            progress(
+                RunProgress(
+                    mode="single",
+                    phase=_msg("ui.generating.kfx"),
+                    current=kpf_units,
+                    total=total_units,
+                    current_name=input_dir.name,
+                    detail_text=_msg("ui.progress.kfx.plugin.running"),
+                    indeterminate=True,
+                )
+            )
+            kfx_result = _capture_console_output(
+                log,
+                convert_kpf_to_kfx,
+                result.output_path,
+                output_path if not keep_kpf else None,
+                plugin_ref=config.kfx_plugin.strip() or None,
+            )
+            if keep_kpf:
+                result.kfx_output_path = kfx_result.kfx_path
+            else:
+                try:
+                    build_output_path.unlink(missing_ok=True)
+                except TypeError:
+                    if build_output_path.exists():
+                        build_output_path.unlink()
+                result.output_path = kfx_result.kfx_path
+                result.kfx_output_path = None
+    except BuildCancelled:
+        status(_msg("ui.task.cancelled"))
+        progress(
+            RunProgress(
+                mode="single",
+                phase=_msg("ui.task.cancelled"),
+                current=last_progress_units,
+                total=total_units,
+                current_name=input_dir.name,
+                detail_text=_msg("ui.task.cancelled"),
+            )
+        )
+        if emit_kfx and not keep_kpf:
             try:
                 build_output_path.unlink(missing_ok=True)
             except TypeError:
                 if build_output_path.exists():
                     build_output_path.unlink()
-            result.output_path = kfx_result.kfx_path
-            result.kfx_output_path = None
+        return RunSummary(
+            mode="single",
+            output_location=output_path.parent,
+            successes=tuple(),
+            failures=tuple(),
+            stopped=True,
+        )
 
     status(_msg("ui.completed"))
     progress(
         RunProgress(
             mode="single",
             phase=_msg("ui.completed"),
-            current=total_steps,
-            total=total_steps,
+            current=total_units,
+            total=total_units,
             current_name=input_dir.name,
             successes=1,
             failures=0,
@@ -612,8 +746,49 @@ def _execute_batch_run(
     successes: list[BuildResult] = []
     failures: list[VolumeFailure] = []
     stopped = False
+    volume_unit = 1000
+    volume_progress: dict[Path, int] = {subdir: 0 for subdir in subdirs}
+    progress_lock = Lock()
+
+    def make_volume_progress_callback(subdir: Path) -> Callable[[BuildStageProgress], None]:
+        def report(stage: BuildStageProgress) -> None:
+            fraction = _build_stage_fraction(stage)
+            if emit_kfx:
+                fraction *= 0.78
+            units = round(volume_unit * max(0.0, min(1.0, fraction)))
+            with progress_lock:
+                volume_progress[subdir] = max(volume_progress.get(subdir, 0), units)
+                current = sum(volume_progress.values())
+            progress(
+                RunProgress(
+                    mode="batch",
+                    phase=_msg(stage.phase),
+                    current=current,
+                    total=len(subdirs) * volume_unit,
+                    current_name=f"{subdir.name} · {stage.current_name}" if stage.current_name else subdir.name,
+                    successes=len(successes),
+                    failures=len(failures),
+                    detail_current=stage.current,
+                    detail_total=stage.total,
+                    detail_text=_build_detail_text(stage),
+                    workers=stage.workers,
+                    indeterminate=stage.indeterminate,
+                )
+            )
+
+        return report
+
+    def mark_volume_done(subdir: Path) -> int:
+        with progress_lock:
+            volume_progress[subdir] = volume_unit
+            return sum(volume_progress.values())
+
+    def current_volume_units() -> int:
+        with progress_lock:
+            return sum(volume_progress.values())
 
     if config.jobs == 1:
+        worker_image_processing = image_processing
         total = len(subdirs)
         for index, subdir in enumerate(subdirs, start=1):
             pause_if_requested()
@@ -626,8 +801,8 @@ def _execute_batch_run(
                 RunProgress(
                     mode="batch",
                     phase=_msg("ui.processing"),
-                    current=index - 1,
-                    total=total,
+                    current=sum(volume_progress.values()),
+                    total=len(subdirs) * volume_unit,
                     current_name=subdir.name,
                     successes=len(successes),
                     failures=len(failures),
@@ -639,36 +814,47 @@ def _execute_batch_run(
                     log,
                     _run_one_volume,
                     subdir,
-                    output_dir / f"{subdir.name}{primary_output_suffix(normalize_output_format(config))}",
+                    _batch_volume_output_path(config, output_dir, subdir, index),
                     template_assets,
-                    image_processing,
+                    worker_image_processing,
                     config.shift,
                     layout_options,
                     emit_kfx,
                     should_keep_kpf(config),
-                    config.kfx_plugin.strip(),
+                    config.kfx_plugin.strip() or None,
                     _resolve_batch_volume_title(config, subdir, index),
+                    make_volume_progress_callback(subdir),
+                    should_stop,
                 )
+            except BuildCancelled:
+                current_units = current_volume_units()
+                stopped = True
+                log(_msg("ui.task.cancelled"))
             except Exception as exc:
+                current_units = mark_volume_done(subdir)
                 failures.append(VolumeFailure(volume_dir=subdir, reason=str(exc)))
                 log(_msg("ui.failed", name=subdir.name))
                 log(_msg("ui.reason", reason=str(exc)))
             else:
+                current_units = mark_volume_done(subdir)
                 successes.append(result)
                 log(_msg("ui.done", name=subdir.name))
             progress(
                 RunProgress(
                     mode="batch",
                     phase=_msg("ui.processing"),
-                    current=index,
-                    total=total,
+                    current=current_units,
+                    total=len(subdirs) * volume_unit,
                     current_name=subdir.name,
                     successes=len(successes),
                     failures=len(failures),
                 )
             )
+            if stopped:
+                break
     else:
         worker_count = min(config.jobs, len(subdirs))
+        worker_image_processing = replace(image_processing, preprocessing_workers=1)
         total = len(subdirs)
         status(_msg("ui.status.parallel.processing", workers=worker_count))
         log(_msg("ui.log.parallel.workers", workers=worker_count))
@@ -689,15 +875,17 @@ def _execute_batch_run(
                 future = executor.submit(
                     _run_one_volume,
                     next_subdir,
-                    output_dir / f"{next_subdir.name}{primary_output_suffix(normalize_output_format(config))}",
+                    _batch_volume_output_path(config, output_dir, next_subdir, next_index),
                     template_assets,
-                    image_processing,
+                    worker_image_processing,
                     config.shift,
                     layout_options,
                     emit_kfx,
                     should_keep_kpf(config),
-                    config.kfx_plugin.strip(),
+                    config.kfx_plugin.strip() or None,
                     _resolve_batch_volume_title(config, next_subdir, next_index),
+                    make_volume_progress_callback(next_subdir),
+                    should_stop,
                 )
                 future_to_subdir[future] = (next_index, next_subdir)
                 log(_msg("ui.started", name=next_subdir.name))
@@ -712,11 +900,17 @@ def _execute_batch_run(
                     completed += 1
                     try:
                         result = future.result()
+                    except BuildCancelled:
+                        current_units = current_volume_units()
+                        stopped = True
+                        log(_msg("ui.task.cancelled"))
                     except Exception as exc:
+                        current_units = mark_volume_done(subdir)
                         failures.append(VolumeFailure(volume_dir=subdir, reason=str(exc)))
                         log(_msg("ui.failed", name=subdir.name))
                         log(_msg("ui.reason", reason=str(exc)))
                     else:
+                        current_units = mark_volume_done(subdir)
                         successes.append(result)
                         log(_msg("ui.done", name=subdir.name))
 
@@ -724,8 +918,8 @@ def _execute_batch_run(
                         RunProgress(
                             mode="batch",
                             phase=_msg("ui.parallel.processing"),
-                            current=completed,
-                            total=total,
+                            current=current_units,
+                            total=len(subdirs) * volume_unit,
                             current_name=subdir.name,
                             successes=len(successes),
                             failures=len(failures),
@@ -749,15 +943,17 @@ def _execute_batch_run(
                     next_future = executor.submit(
                         _run_one_volume,
                         next_subdir,
-                        output_dir / f"{next_subdir.name}{primary_output_suffix(normalize_output_format(config))}",
+                        _batch_volume_output_path(config, output_dir, next_subdir, next_index),
                         template_assets,
-                        image_processing,
+                        worker_image_processing,
                         config.shift,
                         layout_options,
                         emit_kfx,
                         should_keep_kpf(config),
-                        config.kfx_plugin.strip(),
+                        config.kfx_plugin.strip() or None,
                         _resolve_batch_volume_title(config, next_subdir, next_index),
+                        make_volume_progress_callback(next_subdir),
+                        should_stop,
                     )
                     future_to_subdir[next_future] = (next_index, next_subdir)
                     log(_msg("ui.started", name=next_subdir.name))
@@ -768,13 +964,13 @@ def _execute_batch_run(
 
     successes.sort(key=lambda item: item.input_dir.name.lower())
     failures.sort(key=lambda item: item.volume_dir.name.lower())
-    status(_msg("ui.batch.completed"))
+    status(_msg("ui.task.cancelled" if stopped else "ui.batch.completed"))
     progress(
         RunProgress(
             mode="batch",
-            phase=_msg("ui.completed"),
-            current=len(successes) + len(failures),
-            total=len(subdirs),
+            phase=_msg("ui.task.cancelled" if stopped else "ui.completed"),
+            current=current_volume_units() if stopped else (len(successes) + len(failures)) * volume_unit,
+            total=len(subdirs) * volume_unit,
             successes=len(successes),
             failures=len(failures),
         )
@@ -797,8 +993,10 @@ def _run_one_volume(
     layout_options: LayoutOptions,
     emit_kfx: bool,
     keep_kpf: bool,
-    kfx_plugin_ref: str,
+    kfx_plugin_ref: str | None,
     title: str | None = None,
+    progress_callback: BuildProgressCallback | None = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> BuildResult:
     build_output_path = output_path if keep_kpf else output_path.with_suffix(".kpf")
     result = build_kpf(
@@ -809,8 +1007,22 @@ def _run_one_volume(
         image_processing=image_processing,
         shift_first_page=shift_first_page,
         layout_options=layout_options,
+        progress_callback=progress_callback,
+        stop_requested=stop_requested,
     )
     if emit_kfx:
+        if stop_requested is not None and stop_requested():
+            raise BuildCancelled("ui.task.cancelled")
+        if progress_callback is not None:
+            progress_callback(
+                BuildStageProgress(
+                    "ui.generating.kfx",
+                    0,
+                    0,
+                    current_name=input_dir.name,
+                    indeterminate=True,
+                )
+            )
         kfx_result = convert_kpf_to_kfx(
             result.output_path,
             None if keep_kpf else output_path,
@@ -850,6 +1062,19 @@ def _resolve_batch_volume_title(config: AppRunConfig, subdir: Path, volume_index
     if "{series}" in template:
         return rendered.strip() or subdir.name
     return f"{series}{rendered}".strip() or subdir.name
+
+
+def _default_output_base_name(config: AppRunConfig, input_dir: Path) -> str:
+    title = config.title.strip()
+    if config.custom_title_enabled and title:
+        return title
+    return input_dir.name
+
+
+def _batch_volume_output_path(config: AppRunConfig, output_dir: Path, subdir: Path, volume_index: int) -> Path:
+    title = _resolve_batch_volume_title(config, subdir, volume_index)
+    filename = sanitize_output_filename(title, fallback=subdir.name)
+    return output_dir / f"{filename}{primary_output_suffix(normalize_output_format(config))}"
 
 
 def _capture_console_output(

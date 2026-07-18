@@ -64,11 +64,14 @@ from .models import (
     CROP_MODE_OPTIONS,
     GuiState,
     IMAGE_PRESET_OPTIONS,
+    JOBS_MAX,
+    JOBS_MIN,
     OUTPUT_FORMAT_OPTIONS,
     PAGE_LAYOUT_OPTIONS,
     PANEL_PRESET_OPTIONS,
     PANEL_MOVEMENT_OPTIONS,
     READING_DIRECTION_OPTIONS,
+    PRESERVE_COLOR_OPTIONS,
     SHIFT_MODE_OPTIONS,
     TRI_STATE_OPTIONS,
     VIRTUAL_PANELS_OPTIONS,
@@ -794,6 +797,10 @@ class MainWindow(QMainWindow):
         self.image_preset_combo.setToolTip(self._cli_tip("image_preset"))
         layout.addWidget(self._field(self._txt("ui.image.preset"), self.image_preset_combo, self._cli_tip("image_preset")))
 
+        self.preserve_color_combo = self._build_option_combo(PRESERVE_COLOR_OPTIONS)
+        self.preserve_color_combo.setToolTip(self._cli_tip("preserve_color"))
+        layout.addWidget(self._field(self._txt("ui.preserve.color"), self.preserve_color_combo, self._cli_tip("preserve_color")))
+
         self.crop_mode_combo = self._build_option_combo(CROP_MODE_OPTIONS)
         self.crop_mode_combo.setToolTip(self._cli_tip("crop_mode"))
         layout.addWidget(self._field(self._txt("ui.crop"), self.crop_mode_combo, self._cli_tip("crop_mode")))
@@ -917,10 +924,6 @@ class MainWindow(QMainWindow):
             )
         )
 
-        self.preserve_color_combo = self._build_option_combo(TRI_STATE_OPTIONS)
-        self.preserve_color_combo.setToolTip(self._cli_tip("preserve_color"))
-        layout.addWidget(self._field(self._txt("ui.preserve.color"), self.preserve_color_combo, self._cli_tip("preserve_color")))
-
         self.gamma_spin = ScrollPassthroughDoubleSpinBox()
         self.gamma_spin.setDecimals(2)
         self.gamma_spin.setRange(0.1, 8.0)
@@ -997,7 +1000,7 @@ class MainWindow(QMainWindow):
         )
 
         self.jobs_spin = ScrollPassthroughSpinBox()
-        self.jobs_spin.setRange(1, 64)
+        self.jobs_spin.setRange(JOBS_MIN, JOBS_MAX)
         self.jobs_spin.setToolTip(self._cli_tip("jobs"))
         layout.addWidget(self._field(self._txt("ui.parallel.volumes"), self.jobs_spin, self._cli_tip("jobs")))
 
@@ -2557,7 +2560,10 @@ class MainWindow(QMainWindow):
             panel_movement=state.panel_movement,
             image_preset=state.image_preset,
             crop_mode=state.crop_mode,
+            crop_edge_threshold=state.crop_edge_threshold,
             spread_fill_edge_threshold=state.spread_fill_edge_threshold,
+            spread_fill_inner_enabled=state.spread_fill_inner_enabled,
+            spread_fill_inner_edge_threshold=state.spread_fill_inner_edge_threshold,
             target_size_text=target_size_text,
             scribe_panel=state.scribe_panel,
             preserve_color=state.preserve_color,
@@ -2938,7 +2944,10 @@ class MainWindow(QMainWindow):
             panel_movement=state.panel_movement,
             image_preset=state.image_preset,
             crop_mode=state.crop_mode,
+            crop_edge_threshold=state.crop_edge_threshold,
             spread_fill_edge_threshold=state.spread_fill_edge_threshold,
+            spread_fill_inner_enabled=state.spread_fill_inner_enabled,
+            spread_fill_inner_edge_threshold=state.spread_fill_inner_edge_threshold,
             target_size_text=target_size_text,
             scribe_panel=state.scribe_panel,
             preserve_color=state.preserve_color,

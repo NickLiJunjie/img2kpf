@@ -4,6 +4,8 @@ from dataclasses import asdict
 import hashlib
 from pathlib import Path
 import tempfile
+import shutil
+from time import monotonic
 from urllib.parse import unquote, urlparse
 
 from PySide6.QtCore import QObject, Property, QThread, QTimer, QUrl, Signal, Slot
@@ -23,18 +25,30 @@ from ...app_core import (
     validate_run_config,
 )
 from ...i18n import decode_i18n_message, encode_i18n_message, resolve_language
-from ...plugin_registry import DEFAULT_KFX_PLUGIN_ID
+from ...kpf_generator import normalize_crop_mode, resolve_parallel_jobs
+from ...plugin_registry import (
+    DEFAULT_KFX_PLUGIN_ID,
+    install_kfx_plugin_archive,
+    user_kfx_plugin_archive_path,
+)
 from ...spread_splitter import scan_spread_sources
 from ...gui.i18n import normalize_ui_language, translate_gui_text, ui_language_options
 from ...gui.models import (
     CROP_MODE_OPTIONS,
+    CROP_STRENGTH_DEFAULT,
     GuiState,
     IMAGE_PRESET_OPTIONS,
+    JOBS_DEFAULT,
+    JOBS_MAX,
+    JOBS_MIN,
     OUTPUT_FORMAT_OPTIONS,
     PANEL_MOVEMENT_OPTIONS,
     PAGE_LAYOUT_OPTIONS,
+    PERFORMANCE_MODE_OPTIONS,
+    PRESERVE_COLOR_OPTIONS,
     READING_DIRECTION_OPTIONS,
     SHIFT_MODE_OPTIONS,
+    SPREAD_CROP_STRENGTH_DEFAULT,
     TRI_STATE_OPTIONS,
     VIRTUAL_PANELS_OPTIONS,
 )
@@ -120,6 +134,9 @@ class AppController(QObject):
         language = normalize_ui_language(loaded_state.language or resolve_language(), default="zh")
         loaded_state.language = language
         loaded_state.kfx_plugin = self._normalize_kfx_plugin_ref(loaded_state.kfx_plugin)
+        if loaded_state.preserve_color == "auto":
+            loaded_state.preserve_color = "enabled"
+        loaded_state.crop_mode = normalize_crop_mode(loaded_state.crop_mode)
         if not loaded_state.image_custom and (
             not loaded_state.gamma_auto or not loaded_state.contrast_auto or not loaded_state.jpeg_quality_auto
         ):
@@ -137,6 +154,10 @@ class AppController(QObject):
         self._run_progress_successes = 0
         self._run_progress_failures = 0
         self._run_progress_name = ""
+        self._run_progress_detail_text = ""
+        self._run_progress_indeterminate = False
+        self._run_started_at = 0.0
+        self._run_elapsed_seconds = 0
         self._run_cancel_requested = False
         self._run_pause_requested = False
         self._active_task_kind = ""
@@ -154,6 +175,9 @@ class AppController(QObject):
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(240)
         self._preview_timer.timeout.connect(self._refresh_preview)
+        self._run_elapsed_timer = QTimer(self)
+        self._run_elapsed_timer.setInterval(1000)
+        self._run_elapsed_timer.timeout.connect(self._tick_run_elapsed)
         self._preview_source = ""
         self._preview_status_text = self._tr("ui.preview.appears.input.folder.detected")
         self._preview_hint_text = self._tr("ui.preview.reflects.crop.color.single.facing.rtl")
@@ -199,6 +223,15 @@ class AppController(QObject):
         return self._state.custom_title_enabled and detection is not None and detection.mode == "batch"
 
     @Property(str, notify=stateChanged)
+    def titleEffectSummary(self) -> str:
+        title = self._effective_title_preview()
+        if not title:
+            return self._tr("ui.title.effect.waiting")
+        detection = self._last_detection
+        key = "ui.title.effect.first.volume" if detection is not None and detection.mode == "batch" else "ui.title.effect"
+        return self._tr(encode_i18n_message(key, title=title))
+
+    @Property(str, notify=stateChanged)
     def imagePreset(self) -> str:
         return self._state.image_preset
 
@@ -219,8 +252,20 @@ class AppController(QObject):
         return self._state.crop_mode
 
     @Property(float, notify=stateChanged)
+    def cropEdgeThreshold(self) -> float:
+        return self._state.crop_edge_threshold
+
+    @Property(float, notify=stateChanged)
     def spreadFillEdgeThreshold(self) -> float:
         return self._state.spread_fill_edge_threshold
+
+    @Property(bool, notify=stateChanged)
+    def spreadFillInnerEnabled(self) -> bool:
+        return self._state.spread_fill_inner_enabled
+
+    @Property(float, notify=stateChanged)
+    def spreadFillInnerEdgeThreshold(self) -> float:
+        return self._state.spread_fill_inner_edge_threshold
 
     @Property(str, notify=stateChanged)
     def readingDirection(self) -> str:
@@ -305,9 +350,49 @@ class AppController(QObject):
     def kfxPlugin(self) -> str:
         return self._state.kfx_plugin
 
+    @Property(str, notify=stateChanged)
+    def kfxPluginDisplayText(self) -> str:
+        plugin_path = self._effective_kfx_plugin_path()
+        if plugin_path is None:
+            return self._tr("ui.kfx.plugin.load.prompt")
+        try:
+            if plugin_path.resolve() == user_kfx_plugin_archive_path().resolve():
+                return self._tr("ui.kfx.plugin.imported.status")
+        except OSError:
+            pass
+        return plugin_path.name
+
+    @Property(str, notify=stateChanged)
+    def kfxPluginStatus(self) -> str:
+        return self._kfx_plugin_status()
+
+    @Property(str, notify=stateChanged)
+    def kfxPluginStatusText(self) -> str:
+        return self._tr(f"ui.kfx.plugin.status.{self._kfx_plugin_status()}")
+
+    @Property(bool, notify=stateChanged)
+    def kfxPluginImported(self) -> bool:
+        return self._effective_kfx_plugin_path() is not None
+
     @Property(int, notify=stateChanged)
     def jobs(self) -> int:
         return self._state.jobs
+
+    @Property(str, notify=stateChanged)
+    def performanceMode(self) -> str:
+        return self._state.performance_mode
+
+    @Property(int, constant=True)
+    def jobsMin(self) -> int:
+        return JOBS_MIN
+
+    @Property(int, constant=True)
+    def jobsMax(self) -> int:
+        return JOBS_MAX
+
+    @Property(int, constant=True)
+    def jobsDefault(self) -> int:
+        return JOBS_DEFAULT
 
     @Property(str, notify=stateChanged)
     def language(self) -> str:
@@ -516,6 +601,26 @@ class AppController(QObject):
             return "—"
         return f"{self._run_progress_current} / {self._run_progress_total}"
 
+    @Property(str, notify=stateChanged)
+    def runProgressPercentText(self) -> str:
+        if self._run_progress_total <= 0:
+            return ""
+        return f"{round(self.runProgressValue * 100)}%"
+
+    @Property(str, notify=stateChanged)
+    def runDetailText(self) -> str:
+        return self._run_progress_detail_text
+
+    @Property(str, notify=stateChanged)
+    def runElapsedText(self) -> str:
+        if self._run_started_at <= 0 and self._run_elapsed_seconds <= 0:
+            return ""
+        return self._run_elapsed_label()
+
+    @Property(bool, notify=stateChanged)
+    def runProgressIndeterminate(self) -> bool:
+        return self._run_progress_indeterminate
+
     @Property(float, notify=stateChanged)
     def runProgressValue(self) -> float:
         if self._run_progress_total <= 0:
@@ -678,8 +783,16 @@ class AppController(QObject):
         ]
 
     @Property("QVariantList", notify=stateChanged)
+    def performanceModeOptions(self) -> list[dict[str, str]]:
+        return self._options(PERFORMANCE_MODE_OPTIONS)
+
+    @Property("QVariantList", notify=stateChanged)
     def triStateOptions(self) -> list[dict[str, str]]:
         return self._options(TRI_STATE_OPTIONS)
+
+    @Property("QVariantList", notify=stateChanged)
+    def preserveColorOptions(self) -> list[dict[str, str]]:
+        return self._options(PRESERVE_COLOR_OPTIONS)
 
     @Property("QVariantList", notify=stateChanged)
     def shiftModeOptions(self) -> list[dict[str, str]]:
@@ -706,8 +819,16 @@ class AppController(QObject):
         return bool(self._last_detection is not None and self._last_detection.mode == "batch")
 
     @Property(bool, notify=stateChanged)
+    def cropEdgeThresholdEnabled(self) -> bool:
+        return self._state.crop_mode == "smart"
+
+    @Property(bool, notify=stateChanged)
     def spreadFillEdgeThresholdEnabled(self) -> bool:
-        return self._state.crop_mode in {"kcc-spread-fill", "spread-fill"}
+        return self._state.crop_mode == "spread-fill"
+
+    @Property(bool, notify=stateChanged)
+    def spreadFillInnerEdgeThresholdEnabled(self) -> bool:
+        return self._state.crop_mode == "spread-fill" and self._state.spread_fill_inner_enabled
 
     @Slot(str)
     def setInputDir(self, value: str) -> None:
@@ -716,6 +837,9 @@ class AppController(QObject):
             return
         self._state.input_dir = normalized
         self._state.output_location = ""
+        self._state.title = ""
+        self._state.custom_title_enabled = False
+        self._state.volume_title_template = GuiState().volume_title_template
         self._preview_anchor_page_number = None
         self._preview_selected_source_dir = None
         self._detect_input()
@@ -756,17 +880,22 @@ class AppController(QObject):
         self._run_progress_successes = 0
         self._run_progress_failures = 0
         self._run_progress_name = ""
+        self._run_progress_detail_text = ""
+        self._run_progress_indeterminate = False
+        self._run_started_at = monotonic()
+        self._run_elapsed_seconds = 0
         self._run_status_text = self._tr("ui.spread.split.running")
         self._run_summary_text = self._tr("ui.spread.split.preparing")
         self._status_text = self._tr("ui.spread.split.running")
         self.stateChanged.emit()
+        self._run_elapsed_timer.start()
 
         self._worker_thread = QThread(self)
         self._worker = SplitSpreadWorker(
             input_dir,
             self._state.reading_direction,
             self._split_spread_source_dirs(),
-            jobs=self._state.jobs,
+            jobs=resolve_parallel_jobs(self._state.performance_mode),
             shift_first_page=self._state.shift,
         )
         self._worker.moveToThread(self._worker_thread)
@@ -901,6 +1030,9 @@ class AppController(QObject):
         if self._state.title == value:
             return
         self._state.title = value
+        self._state.output_location = ""
+        if self._state.input_dir:
+            self._detect_input()
         self._mark_output_affecting_change()
         self._save()
         self.stateChanged.emit()
@@ -911,6 +1043,9 @@ class AppController(QObject):
         if self._state.custom_title_enabled == enabled:
             return
         self._state.custom_title_enabled = enabled
+        self._state.output_location = ""
+        if self._state.input_dir:
+            self._detect_input()
         self._mark_output_affecting_change()
         self._save()
         self.stateChanged.emit()
@@ -928,6 +1063,8 @@ class AppController(QObject):
     def setOption(self, name: str, value: str) -> None:
         if not hasattr(self._state, name):
             return
+        if name == "preserve_color" and value == "auto":
+            value = "enabled"
         if getattr(self._state, name) == value:
             return
         setattr(self._state, name, value)
@@ -948,6 +1085,31 @@ class AppController(QObject):
             self._state.shift = False
         if name == "panel_preset":
             self._state.scribe_panel = value == "scribe_1240x1860"
+        if name == "performance_mode":
+            self._save()
+            self.stateChanged.emit()
+            return
+        self._mark_output_affecting_change()
+        self._save()
+        self._schedule_preview_refresh()
+        self.stateChanged.emit()
+
+    @Slot(float)
+    def setCropEdgeThreshold(self, value: float) -> None:
+        normalized = round(max(0.7, min(float(value), 1.0)), 2)
+        if self._state.crop_edge_threshold == normalized:
+            return
+        self._state.crop_edge_threshold = normalized
+        self._mark_output_affecting_change()
+        self._save()
+        self._schedule_preview_refresh()
+        self.stateChanged.emit()
+
+    @Slot()
+    def resetCropEdgeThreshold(self) -> None:
+        if self._state.crop_edge_threshold == CROP_STRENGTH_DEFAULT:
+            return
+        self._state.crop_edge_threshold = CROP_STRENGTH_DEFAULT
         self._mark_output_affecting_change()
         self._save()
         self._schedule_preview_refresh()
@@ -964,11 +1126,42 @@ class AppController(QObject):
         self._schedule_preview_refresh()
         self.stateChanged.emit()
 
+    @Slot(bool)
+    def setSpreadFillInnerEnabled(self, enabled: bool) -> None:
+        if self._state.spread_fill_inner_enabled == enabled:
+            return
+        self._state.spread_fill_inner_enabled = enabled
+        self._mark_output_affecting_change()
+        self._save()
+        self._schedule_preview_refresh()
+        self.stateChanged.emit()
+
+    @Slot(float)
+    def setSpreadFillInnerEdgeThreshold(self, value: float) -> None:
+        normalized = round(max(0.7, min(float(value), 1.0)), 2)
+        if self._state.spread_fill_inner_edge_threshold == normalized:
+            return
+        self._state.spread_fill_inner_edge_threshold = normalized
+        self._mark_output_affecting_change()
+        self._save()
+        self._schedule_preview_refresh()
+        self.stateChanged.emit()
+
+    @Slot()
+    def resetSpreadFillInnerEdgeThreshold(self) -> None:
+        if self._state.spread_fill_inner_edge_threshold == SPREAD_CROP_STRENGTH_DEFAULT:
+            return
+        self._state.spread_fill_inner_edge_threshold = SPREAD_CROP_STRENGTH_DEFAULT
+        self._mark_output_affecting_change()
+        self._save()
+        self._schedule_preview_refresh()
+        self.stateChanged.emit()
+
     @Slot()
     def resetSpreadFillEdgeThreshold(self) -> None:
-        if self._state.spread_fill_edge_threshold == 0.96:
+        if self._state.spread_fill_edge_threshold == SPREAD_CROP_STRENGTH_DEFAULT:
             return
-        self._state.spread_fill_edge_threshold = 0.96
+        self._state.spread_fill_edge_threshold = SPREAD_CROP_STRENGTH_DEFAULT
         self._mark_output_affecting_change()
         self._save()
         self._schedule_preview_refresh()
@@ -1041,9 +1234,40 @@ class AppController(QObject):
         self._save()
         self.stateChanged.emit()
 
+    @Slot(str)
+    def importKfxPlugin(self, value: str) -> None:
+        source = Path(self._normalize_path(value)).expanduser()
+        try:
+            installed_path = install_kfx_plugin_archive(source)
+        except Exception as exc:
+            self._status_text = self._tr(encode_i18n_message("ui.kfx.plugin.import.failed", reason=str(exc)))
+            self.stateChanged.emit()
+            return
+
+        self._state.kfx_plugin = str(installed_path)
+        self._status_text = self._tr("ui.kfx.plugin.imported")
+        self._mark_output_affecting_change()
+        self._save()
+        self.stateChanged.emit()
+
+    @Slot()
+    def removeKfxPlugin(self) -> None:
+        plugin_path = user_kfx_plugin_archive_path()
+        try:
+            plugin_path.unlink(missing_ok=True)
+        except TypeError:
+            if plugin_path.exists():
+                plugin_path.unlink()
+        shutil.rmtree(plugin_path.parent, ignore_errors=True)
+        self._state.kfx_plugin = ""
+        self._status_text = self._tr("ui.kfx.plugin.removed")
+        self._mark_output_affecting_change()
+        self._save()
+        self.stateChanged.emit()
+
     @Slot(int)
     def setJobs(self, value: int) -> None:
-        normalized = max(1, min(int(value), 64))
+        normalized = max(JOBS_MIN, min(int(value), JOBS_MAX))
         if self._state.jobs == normalized:
             return
         self._state.jobs = normalized
@@ -1285,11 +1509,16 @@ class AppController(QObject):
         self._run_progress_successes = 0
         self._run_progress_failures = 0
         self._run_progress_name = ""
+        self._run_progress_detail_text = ""
+        self._run_progress_indeterminate = False
+        self._run_started_at = monotonic()
+        self._run_elapsed_seconds = 0
         self._run_status_text = self._tr("ui.preparing")
         self._run_summary_text = self._tr("ui.background.task.about.start")
         self._status_text = self._tr("ui.running")
         self._last_output_location = ""
         self.stateChanged.emit()
+        self._run_elapsed_timer.start()
 
         self._worker_thread = QThread(self)
         self._worker = BuildWorker(config)
@@ -1383,7 +1612,10 @@ class AppController(QObject):
             panel_movement=self._state.panel_movement,
             image_preset=self._state.image_preset,
             crop_mode=self._state.crop_mode,
+            crop_edge_threshold=self._state.crop_edge_threshold,
             spread_fill_edge_threshold=self._state.spread_fill_edge_threshold,
+            spread_fill_inner_enabled=self._state.spread_fill_inner_enabled,
+            spread_fill_inner_edge_threshold=self._state.spread_fill_inner_edge_threshold,
             target_size_text=self._state.target_size_text if self._state.panel_preset == "custom" else "",
             scribe_panel=self._state.scribe_panel,
             preserve_color=self._state.preserve_color,
@@ -1398,8 +1630,16 @@ class AppController(QObject):
             emit_kfx=self._state.output_format in {"kpf_kfx", "kfx_only"},
             output_format=self._state.output_format,
             kfx_plugin=self._state.kfx_plugin,
-            jobs=self._state.jobs,
+            jobs=self._auto_jobs_for_current_input(),
+            performance_mode=self._state.performance_mode,
         )
+
+    def _auto_jobs_for_current_input(self) -> int:
+        detection = self._last_detection
+        if detection is None or detection.mode != "batch":
+            return 1
+        volume_count = max(1, len(detection.image_subdirs))
+        return max(1, min(volume_count, resolve_parallel_jobs(self._state.performance_mode)))
 
     def _detect_input(self) -> None:
         input_text = self._state.input_dir.strip()
@@ -1454,7 +1694,12 @@ class AppController(QObject):
             self._source_summary = ""
 
         if not self._state.output_location and detection.is_runnable:
-            suggestion = suggest_output_location(Path(input_text), detection.mode, self._state.output_format)
+            suggestion = suggest_output_location(
+                Path(input_text),
+                detection.mode,
+                self._state.output_format,
+                self._default_output_base_name(Path(input_text)),
+            )
             if suggestion is not None:
                 self._state.output_location = str(suggestion)
         self.detectionChanged.emit()
@@ -1516,7 +1761,7 @@ class AppController(QObject):
 
     def _preview_cache_key(self, source_dir: Path) -> tuple:
         return (
-            "preview-crop-v5-facing-fill-outer-anchor",
+            "preview-crop-v15-smooth-budget-crop",
             str(source_dir),
             self._state.image_preset,
             self._state.image_custom,
@@ -1527,7 +1772,10 @@ class AppController(QObject):
             self._state.jpeg_quality_value,
             self._state.jpeg_quality_auto,
             self._state.crop_mode,
+            round(self._state.crop_edge_threshold, 2),
             round(self._state.spread_fill_edge_threshold, 2),
+            self._state.spread_fill_inner_enabled,
+            round(self._state.spread_fill_inner_edge_threshold, 2),
             self._state.reading_direction,
             self._state.page_layout,
             self._state.virtual_panels,
@@ -1717,13 +1965,12 @@ class AppController(QObject):
         self._run_progress_successes = int(getattr(progress, "successes", 0) or 0)
         self._run_progress_failures = int(getattr(progress, "failures", 0) or 0)
         self._run_progress_name = str(getattr(progress, "current_name", "") or "")
+        self._run_progress_indeterminate = bool(getattr(progress, "indeterminate", False))
 
         phase = self._tr(str(getattr(progress, "phase", "") or self._run_status_text))
         pieces = [phase]
         if self._run_progress_name:
             pieces.append(self._run_progress_name)
-        if total > 0:
-            pieces.append(f"{current} / {total}")
         if str(getattr(progress, "mode", "")) == "batch":
             pieces.append(
                 self._tr(
@@ -1735,11 +1982,26 @@ class AppController(QObject):
                 )
             )
         self._run_summary_text = " · ".join(pieces)
+        detail_pieces: list[str] = []
+        detail_current = int(getattr(progress, "detail_current", 0) or 0)
+        detail_total = int(getattr(progress, "detail_total", 0) or 0)
+        if detail_total > 0:
+            detail_pieces.append(f"{detail_current} / {detail_total}")
+        detail_text = str(getattr(progress, "detail_text", "") or "")
+        if detail_text:
+            detail_pieces.append(self._tr(detail_text))
+        if self._run_progress_indeterminate:
+            detail_pieces.append(self._tr("ui.progress.still.running"))
+        self._run_progress_detail_text = " · ".join(detail_pieces)
         if self._is_running and self._run_state not in {"paused", "pausing", "cancelling"}:
             self._run_state = "running"
         self.stateChanged.emit()
 
     def _handle_finished(self, summary: object) -> None:
+        self._finalize_run_elapsed()
+        self._run_elapsed_timer.stop()
+        self._run_progress_indeterminate = False
+        self._run_progress_detail_text = ""
         self._append_log_entry("ui.run.completed", level="success")
         successes = len(getattr(summary, "successes", ()) or ())
         failures = len(getattr(summary, "failures", ()) or ())
@@ -1764,19 +2026,45 @@ class AppController(QObject):
             self._run_status_text = self._tr("ui.task.completed")
             self._status_text = self._tr("ui.task.completed")
 
-        self._run_summary_text = self._tr(
-            encode_i18n_message(
-                "ui.task.summary.done",
-                successes=successes,
-                failures=failures,
-                output=output_location,
+        self._run_summary_text = self._append_elapsed_to_summary(
+            self._tr(
+                encode_i18n_message(
+                    "ui.task.summary.done",
+                    successes=successes,
+                    failures=failures,
+                    output=output_location,
+                )
             )
         )
+
         self._run_cancel_requested = False
         self._run_pause_requested = False
         self.stateChanged.emit()
 
+    def _append_elapsed_to_summary(self, summary: str) -> str:
+        elapsed = self._run_elapsed_label()
+        return f"{summary} · {elapsed}" if elapsed else summary
+
+    def _run_elapsed_label(self) -> str:
+        if self._run_elapsed_seconds < 0:
+            return ""
+        minutes, seconds = divmod(self._run_elapsed_seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            duration = f"{hours:d}:{minutes:02d}:{seconds:02d}"
+        else:
+            duration = f"{minutes:02d}:{seconds:02d}"
+        return self._tr(encode_i18n_message("ui.elapsed", duration=duration))
+
+    def _finalize_run_elapsed(self) -> None:
+        if self._run_started_at > 0:
+            self._run_elapsed_seconds = max(0, int(monotonic() - self._run_started_at))
+
     def _handle_split_finished(self, result: object) -> None:
+        self._finalize_run_elapsed()
+        self._run_elapsed_timer.stop()
+        self._run_progress_indeterminate = False
+        self._run_progress_detail_text = ""
         output_dir = Path(str(getattr(result, "output_dir", ""))).expanduser()
         output_count = int(getattr(result, "output_image_count", 0) or 0)
         split_count = int(getattr(result, "split_image_count", 0) or 0)
@@ -1784,13 +2072,15 @@ class AppController(QObject):
         self._run_state = "completed"
         self._run_status_text = self._tr("ui.task.completed")
         self._run_progress_current = max(self._run_progress_current, self._run_progress_total)
-        self._run_summary_text = self._tr(
-            encode_i18n_message(
-                "ui.spread.split.completed",
-                split=split_count,
-                blank=blank_count,
-                output=output_count,
-                path=output_dir,
+        self._run_summary_text = self._append_elapsed_to_summary(
+            self._tr(
+                encode_i18n_message(
+                    "ui.spread.split.completed",
+                    split=split_count,
+                    blank=blank_count,
+                    output=output_count,
+                    path=output_dir,
+                )
             )
         )
         self._status_text = self._tr(
@@ -1809,6 +2099,10 @@ class AppController(QObject):
         self.stateChanged.emit()
 
     def _handle_split_failed(self, message: str) -> None:
+        self._finalize_run_elapsed()
+        self._run_elapsed_timer.stop()
+        self._run_progress_indeterminate = False
+        self._run_progress_detail_text = ""
         is_cancelled = message == "ui.spread.split.cancelled"
         level = "muted" if is_cancelled else "danger"
         log_key = "ui.spread.split.cancelled" if is_cancelled else "ui.spread.split.failed"
@@ -1831,6 +2125,10 @@ class AppController(QObject):
         self.stateChanged.emit()
 
     def _handle_failed(self, message: str) -> None:
+        self._finalize_run_elapsed()
+        self._run_elapsed_timer.stop()
+        self._run_progress_indeterminate = False
+        self._run_progress_detail_text = ""
         self._append_log_entry(encode_i18n_message("ui.log.run.failed", reason=message), level="danger")
         self._run_state = "failed"
         self._run_status_text = self._tr("ui.task.failed")
@@ -1841,6 +2139,7 @@ class AppController(QObject):
         self.stateChanged.emit()
 
     def _cleanup_worker(self) -> None:
+        self._run_elapsed_timer.stop()
         if self._worker is not None:
             self._worker.deleteLater()
             self._worker = None
@@ -1849,6 +2148,13 @@ class AppController(QObject):
             self._worker_thread = None
         self._is_running = False
         self._active_task_kind = ""
+        self.stateChanged.emit()
+
+    def _tick_run_elapsed(self) -> None:
+        if not self._is_running or self._run_started_at <= 0:
+            self._run_elapsed_timer.stop()
+            return
+        self._run_elapsed_seconds = max(0, int(monotonic() - self._run_started_at))
         self.stateChanged.emit()
 
     def _mark_output_affecting_change(self) -> None:
@@ -1881,9 +2187,35 @@ class AppController(QObject):
         self._run_progress_successes = 0
         self._run_progress_failures = 0
         self._run_progress_name = ""
+        self._run_progress_detail_text = ""
+        self._run_progress_indeterminate = False
+        self._run_started_at = 0.0
+        self._run_elapsed_seconds = 0
         self._run_cancel_requested = False
         self._run_pause_requested = False
         self._active_task_kind = ""
+
+    def _effective_kfx_plugin_path(self) -> Path | None:
+        normalized = self._normalize_kfx_plugin_ref(self._state.kfx_plugin)
+        if normalized:
+            path = Path(normalized).expanduser()
+            if path.is_file():
+                return path
+        imported_path = user_kfx_plugin_archive_path()
+        if imported_path.is_file():
+            return imported_path
+        return None
+
+    def _kfx_plugin_status(self) -> str:
+        plugin_path = self._effective_kfx_plugin_path()
+        if plugin_path is None:
+            return "missing"
+        try:
+            if plugin_path.resolve() == user_kfx_plugin_archive_path().resolve():
+                return "ready"
+        except OSError:
+            pass
+        return "external"
 
     def _output_open_target(self) -> Path | None:
         if not self._last_output_location.strip():
@@ -1910,6 +2242,9 @@ class AppController(QObject):
         return None
 
     def _kfx_plugin_location_target(self) -> Path | None:
+        plugin_path = self._effective_kfx_plugin_path()
+        if plugin_path is not None:
+            return plugin_path.parent
         return self._path_location_target(self._state.kfx_plugin)
 
     def _path_location_target(self, value: str, *, prefer_directory: bool = False) -> Path | None:
@@ -2043,7 +2378,17 @@ class AppController(QObject):
                 ),
                 self._image_settings_summary,
             ),
-            ("ui.crop", ("crop_mode", "spread_fill_edge_threshold"), self._crop_summary),
+            (
+                "ui.crop",
+                (
+                    "crop_mode",
+                    "crop_edge_threshold",
+                    "spread_fill_edge_threshold",
+                    "spread_fill_inner_enabled",
+                    "spread_fill_inner_edge_threshold",
+                ),
+                self._crop_summary,
+            ),
             ("ui.reading.direction", ("reading_direction",), self._reading_direction_summary),
             ("ui.layout", ("page_layout", "shift_mode", "shift"), self._layout_summary),
             ("ui.virtual.panels", ("virtual_panels", "panel_movement"), self._virtual_panels_summary),
@@ -2052,6 +2397,7 @@ class AppController(QObject):
             ("ui.template.file", ("template_path",), self._template_path_summary),
             ("ui.kfx.plugin", ("kfx_plugin",), self._kfx_plugin_summary),
             ("ui.parallel.volumes", ("jobs",), self._jobs_summary),
+            ("ui.performance.mode", ("performance_mode",), self._performance_mode_summary),
         )
         current_payload = self._profile_payload(current)
         target_payload = self._profile_payload(target)
@@ -2082,8 +2428,15 @@ class AppController(QObject):
 
     def _crop_summary(self, state: GuiState) -> str:
         summary = self._label_for_value(CROP_MODE_OPTIONS, state.crop_mode)
-        if state.crop_mode in {"kcc-spread-fill", "spread-fill"}:
-            summary = " · ".join([summary, f"{self._tr('ui.spread.fill.edge.threshold')} {state.spread_fill_edge_threshold:.2f}"])
+        if state.crop_mode == "smart":
+            summary = " · ".join([summary, f"{self._tr('ui.crop.edge.threshold')} {state.crop_edge_threshold:.2f}"])
+        if state.crop_mode == "spread-fill":
+            parts = [summary, f"{self._tr('ui.spread.outer.edge.threshold')} {state.spread_fill_edge_threshold:.2f}"]
+            if state.spread_fill_inner_enabled:
+                parts.append(f"{self._tr('ui.spread.inner.edge.threshold')} {state.spread_fill_inner_edge_threshold:.2f}")
+            else:
+                parts.append(self._tr("ui.spread.inner.crop.disabled"))
+            summary = " · ".join(parts)
         return summary
 
     def _reading_direction_summary(self, state: GuiState) -> str:
@@ -2126,6 +2479,49 @@ class AppController(QObject):
 
     def _jobs_summary(self, state: GuiState) -> str:
         return str(state.jobs)
+
+    def _performance_mode_summary(self, state: GuiState) -> str:
+        return self._label_for_value(PERFORMANCE_MODE_OPTIONS, state.performance_mode)
+
+    def _default_output_base_name(self, input_dir: Path) -> str:
+        title = self._state.title.strip()
+        if self._state.custom_title_enabled and title:
+            return title
+        return input_dir.name
+
+    def _effective_title_preview(self) -> str:
+        detection = self._last_detection
+        input_dir_text = self._state.input_dir.strip()
+        input_name = Path(input_dir_text).expanduser().name if input_dir_text else ""
+        if detection is not None and detection.mode == "batch":
+            first_subdir = detection.image_subdirs[0] if detection.image_subdirs else None
+            if self._state.custom_title_enabled:
+                series = self._state.title.strip()
+                if not series:
+                    return ""
+                return self._format_batch_title_preview(series, first_subdir.name if first_subdir else input_name)
+            return first_subdir.name if first_subdir else input_name
+        if self._state.custom_title_enabled:
+            return self._state.title.strip()
+        return input_name
+
+    def _format_batch_title_preview(self, series: str, folder_name: str) -> str:
+        template = self._state.volume_title_template
+        if not template.strip():
+            template = GuiState().volume_title_template
+        values = {
+            "series": series,
+            "volume": 1,
+            "volume2": "01",
+            "folder": folder_name,
+        }
+        try:
+            rendered = template.format(**values)
+        except Exception:
+            rendered = " 第 1 卷"
+        if "{series}" in template:
+            return rendered.strip() or folder_name
+        return f"{series}{rendered}".strip() or folder_name
 
     def _input_dialog_folder(self) -> Path:
         if self._state.input_dir.strip():
@@ -2170,7 +2566,12 @@ class AppController(QObject):
         input_dir = self._state.input_dir.strip()
         if input_dir:
             base = Path(input_dir).expanduser()
-            suggestion = suggest_output_location(base, self._last_detection.mode if self._last_detection else "single", self._state.output_format)
+            suggestion = suggest_output_location(
+                base,
+                self._last_detection.mode if self._last_detection else "single",
+                self._state.output_format,
+                self._default_output_base_name(base),
+            )
             if suggestion is not None and suggestion.suffix:
                 return suggestion
         return self._output_dialog_folder() / f"output{primary_output_suffix(self._state.output_format)}"

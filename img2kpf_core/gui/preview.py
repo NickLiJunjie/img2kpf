@@ -23,7 +23,9 @@ from ..kpf_generator import (
     load_pillow,
     load_source_image,
     maybe_add_facing_fill_trim,
+    normalize_crop_mode,
     synchronize_facing_crop_boxes,
+    trim_facing_crop_box_to_target_aspect,
 )
 
 
@@ -312,7 +314,11 @@ def _process_basic_page(
     working = source_image.copy()
     crop_box = None
     if image_processing.crop_mode == "smart":
-        crop_box = build_smart_crop_box(working, target_size=image_processing.target_size)
+        crop_box = build_smart_crop_box(
+            working,
+            target_size=image_processing.target_size,
+            edge_threshold=image_processing.crop_edge_threshold,
+        )
         working = apply_crop_box(working, crop_box)
     processed = _finalize_processed_image(working, image_processing)
     crop_overlay = _build_crop_overlay_image(source_image, image_processing)
@@ -332,6 +338,17 @@ def _process_facing_single_page(
         page_position=page_position,
         template_direction=template_direction,
     )
+    if normalize_crop_mode(image_processing.crop_mode) == "spread-fill" and crop_box is not None:
+        crop_box = trim_facing_crop_box_to_target_aspect(
+            source_image,
+            crop_box,
+            page_position,
+            template_direction,
+            image_processing.target_size,
+            outer_threshold=image_processing.spread_fill_edge_threshold,
+            inner_enabled=image_processing.spread_fill_inner_enabled,
+            inner_threshold=image_processing.spread_fill_inner_edge_threshold,
+        )
     processed = _finalize_processed_image(
         apply_crop_box(source_image.copy(), crop_box),
         image_processing,
@@ -366,6 +383,8 @@ def _process_spread_group(
                 template_direction=template_direction,
                 target_size=image_processing.target_size,
                 edge_threshold=image_processing.spread_fill_edge_threshold,
+                inner_enabled=image_processing.spread_fill_inner_enabled,
+                inner_edge_threshold=image_processing.spread_fill_inner_edge_threshold,
             )
         )
     else:
@@ -436,7 +455,7 @@ def _render_preview_image(pages: list[PreviewPage], show_crop_boxes: bool):
 
     page_count = max(1, len(pages))
     image_kind = "crop-overlay" if show_crop_boxes else "processed"
-    spread_width, spread_height = _spread_image_size(pages, image_kind=image_kind)
+    spread_width, spread_height = _spread_image_size(pages, image_kind="processed")
     max_content_width = PREVIEW_MAX_SPREAD_WIDTH if page_count == 2 else PREVIEW_MAX_SINGLE_WIDTH
     content_width = max(1, min(spread_width, max_content_width))
     content_height = max(1, round(content_width / max(spread_width / max(1, spread_height), 0.01)))
@@ -546,20 +565,30 @@ def _compose_spread_image(
     for page, image in zip(pages, images):
         offset_y = (max_height - image.height) // 2
         spread.paste(image, (cursor_x, offset_y))
-        if image_kind != "processed" and not page.is_blank:
-            left, top, right, bottom = page.crop_box or (0, 0, image.width, image.height)
-            left = max(0, min(left, image.width))
-            top = max(0, min(top, image.height))
-            right = max(left, min(right, image.width))
-            bottom = max(top, min(bottom, image.height))
-            crop_rects.append(
-                (
-                    cursor_x + left,
-                    offset_y + top,
-                    cursor_x + right,
-                    offset_y + bottom,
+        if not page.is_blank:
+            if image_kind == "processed":
+                crop_rects.append(
+                    (
+                        cursor_x,
+                        offset_y,
+                        cursor_x + image.width,
+                        offset_y + image.height,
+                    )
                 )
-            )
+            else:
+                left, top, right, bottom = page.crop_box or (0, 0, image.width, image.height)
+                left = max(0, min(left, image.width))
+                top = max(0, min(top, image.height))
+                right = max(left, min(right, image.width))
+                bottom = max(top, min(bottom, image.height))
+                crop_rects.append(
+                    (
+                        cursor_x + left,
+                        offset_y + top,
+                        cursor_x + right,
+                        offset_y + bottom,
+                    )
+                )
         cursor_x += image.width
 
     return spread, crop_rects

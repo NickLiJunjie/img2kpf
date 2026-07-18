@@ -44,9 +44,18 @@ Use it together with:
 
 ### `--jobs INT`
 
-- Purpose: number of parallel workers in batch mode
+- Purpose: number of parallel tasks in batch mode
 - Image impact: none directly
-- Practical impact: higher values can speed up large batches but increase CPU / disk pressure
+- Practical impact: processes multiple volumes at once; per-volume image preprocessing speed is controlled by `--performance-mode`
+
+### `--performance-mode {eco,balanced,max}`
+
+- Purpose: controls per-volume image preprocessing parallelism
+- Image impact: none; it only changes runtime speed
+- Recommended:
+  - `eco`: serial, lowest resource usage
+  - `balanced`: about half the CPU, recommended default
+  - `max`: up to 16 image preprocessing threads for high-end Apple Silicon machines
 
 ## 2. KFX generation
 
@@ -165,22 +174,14 @@ This option is the main shortcut for image look.
   - keeps a safety margin
   - avoids aggressive cropping when content is too close to the edge
 
-### `--crop-mode spread-safe`
+### `--crop-mode spread-fill`
 
 - Linked crop for facing pages
 - Image impact:
-  - tries to keep left/right pages visually synchronized
-  - reduces asymmetry across a spread
-  - safer than fill mode for books with tight gutters or uneven scans
-
-### `--crop-mode spread-fill`
-
-- Linked spread crop plus safe inner-margin reduction
-- Image impact:
-  - aims to reduce empty gutter space and fill height better
-  - more aggressive than `spread-safe`
-  - can improve full-screen presence on Scribe
-  - should be tested book by book because gutter-sensitive art may prefer `spread-safe`
+  - keeps facing pages governed by one linked crop rule
+  - searches for a crop frame that better matches the target device ratio
+  - protects the inner gutter by default; when inner trim is enabled, only bright low-information gutter areas are eligible
+  - should be previewed book by book because scans vary a lot
 
 ## 6. Canvas and device fit
 
@@ -268,7 +269,7 @@ python kpf_generator.py \
   --scribe-panel
 ```
 
-### Brighter Scribe-oriented profile
+### Smart single-page crop profile
 
 ```bash
 python kpf_generator.py \
@@ -279,11 +280,11 @@ python kpf_generator.py \
   --virtual-panels \
   --panel-movement vertical \
   --image-preset bright \
-  --crop-mode spread-safe \
+  --crop-mode smart \
   --scribe-panel
 ```
 
-### More aggressive fill profile
+### Facing linked crop profile
 
 ```bash
 python kpf_generator.py \
@@ -297,7 +298,7 @@ python kpf_generator.py \
 ## 10. Practical advice
 
 - Start with `--crop-mode off` before chasing whitespace issues.
-- If spreads feel uneven, test `spread-safe` before `spread-fill`.
+- For facing-page books, use `--crop-mode spread-fill`, then decide from preview whether inner gutter trimming should be enabled.
 - If pages are too dark on device, try `bright` or raise `--gamma`.
 - If color pages look dull, keep `--preserve-color`.
 - If your inputs are already clean and preprocessed, start from `--image-preset none`.

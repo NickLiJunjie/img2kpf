@@ -11,6 +11,11 @@ TRI_STATE_OPTIONS = (
     ("disabled", "ui.option.disabled"),
 )
 
+PRESERVE_COLOR_OPTIONS = (
+    ("enabled", "ui.option.enabled"),
+    ("disabled", "ui.option.disabled"),
+)
+
 IMAGE_PRESET_OPTIONS = (
     ("none", "ui.image.preset.none"),
     ("kcc-current-like", "ui.image.preset.standard"),
@@ -20,8 +25,7 @@ IMAGE_PRESET_OPTIONS = (
 CROP_MODE_OPTIONS = (
     ("off", "ui.crop.mode.off"),
     ("smart", "ui.crop.mode.smart"),
-    ("kcc-spread", "ui.crop.mode.facing.safe"),
-    ("kcc-spread-fill", "ui.crop.mode.facing.fill"),
+    ("spread-fill", "ui.crop.mode.facing.linked"),
 )
 
 READING_DIRECTION_OPTIONS = (
@@ -50,6 +54,19 @@ PANEL_PRESET_OPTIONS = (
     ("custom", "ui.custom.size"),
 )
 
+PERFORMANCE_MODE_OPTIONS = (
+    ("eco", "ui.performance.mode.eco"),
+    ("balanced", "ui.performance.mode.balanced"),
+    ("max", "ui.performance.mode.max"),
+)
+
+JOBS_MIN = 1
+JOBS_MAX = 16
+JOBS_DEFAULT = 5
+CROP_STRENGTH_DEFAULT = 1.00
+SPREAD_CROP_STRENGTH_DEFAULT = 0.90
+CROP_STRENGTH_SEMANTICS_VERSION = 4
+
 SHIFT_MODE_OPTIONS = (
     ("off", "ui.no.shift"),
     ("on", "ui.enable.shift"),
@@ -77,11 +94,15 @@ class GuiState:
     image_preset: str = "kcc-legacy-like"
     image_custom: bool = False
     crop_mode: str = "off"
-    spread_fill_edge_threshold: float = 0.96
+    crop_edge_threshold: float = CROP_STRENGTH_DEFAULT
+    spread_fill_edge_threshold: float = SPREAD_CROP_STRENGTH_DEFAULT
+    spread_fill_inner_enabled: bool = False
+    spread_fill_inner_edge_threshold: float = SPREAD_CROP_STRENGTH_DEFAULT
+    crop_strength_semantics_version: int = CROP_STRENGTH_SEMANTICS_VERSION
     target_size_text: str = ""
     scribe_panel: bool = True
     panel_preset: str = "scribe_1240x1860"
-    preserve_color: TriStateValue = "auto"
+    preserve_color: TriStateValue = "enabled"
     gamma_value: float = 1.8
     gamma_auto: bool = True
     contrast_value: float = 1.0
@@ -94,6 +115,7 @@ class GuiState:
     shift_mode: str = "off"
     output_format: str = "kpf"
     kfx_plugin: str = ""
-    jobs: int = 1
+    jobs: int = JOBS_DEFAULT
+    performance_mode: str = "balanced"
     language: str = "zh"
     theme_mode: str = "light"

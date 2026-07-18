@@ -48,6 +48,16 @@ class _VolumeSplitResult:
     output_image_count: int
 
 
+@dataclass(frozen=True)
+class _ImageSplitPlan:
+    image_path: Path
+    should_split: bool
+    split_x: int
+    blank_path: Path | None
+    output_paths: tuple[Path, ...]
+    blank_size: tuple[int, int] | None = None
+
+
 def is_spread_size(width: int, height: int, min_ratio: float = DEFAULT_SPREAD_MIN_RATIO) -> bool:
     if width <= 0 or height <= 0:
         return False
@@ -99,6 +109,7 @@ def split_spread_folder(
     reading_direction: str = "rtl",
     min_ratio: float = DEFAULT_SPREAD_MIN_RATIO,
     jpeg_quality: int = DEFAULT_JPEG_QUALITY,
+    jobs: int = 1,
     progress_callback: Callable[[int, int, Path], None] | None = None,
     stop_requested: Callable[[], bool] | None = None,
 ) -> SpreadSplitResult:
@@ -109,6 +120,7 @@ def split_spread_folder(
         reading_direction=reading_direction,
         min_ratio=min_ratio,
         jpeg_quality=jpeg_quality,
+        jobs=jobs,
         progress_callback=progress_callback,
         stop_requested=stop_requested,
     )
@@ -182,6 +194,7 @@ def split_spread_sources(
                     jpeg_quality=jpeg_quality,
                     align_facing_pairs=align_facing_pairs,
                     shift_first_page=shift_first_page,
+                    jobs=max(1, int(jobs)) if len(source_dirs) == 1 else 1,
                     Image=Image,
                     progress_callback=report_image_done,
                     stop_requested=should_stop,
@@ -204,6 +217,7 @@ def split_spread_sources(
                         jpeg_quality=jpeg_quality,
                         align_facing_pairs=align_facing_pairs,
                         shift_first_page=shift_first_page,
+                        jobs=1,
                         Image=Image,
                         progress_callback=report_image_done,
                         stop_requested=should_stop,
@@ -260,12 +274,67 @@ def _split_one_source(
     jpeg_quality: int,
     align_facing_pairs: bool,
     shift_first_page: bool,
+    jobs: int,
     Image,
     progress_callback: Callable[[Path], None],
     stop_requested: Callable[[], bool],
 ) -> _VolumeSplitResult:
     destination_dir = _destination_dir_for_source(input_dir, source_dir, output_dir, preserve_source_dir)
     destination_dir.mkdir(parents=True, exist_ok=True)
+    plans, split_count, copied_count, blank_count, output_count = _plan_source_split(
+        image_paths=image_paths,
+        destination_dir=destination_dir,
+        reading_direction=reading_direction,
+        min_ratio=min_ratio,
+        align_facing_pairs=align_facing_pairs,
+        shift_first_page=shift_first_page,
+        Image=Image,
+        stop_requested=stop_requested,
+    )
+
+    worker_count = max(1, min(int(jobs), len(plans)))
+    if worker_count == 1:
+        for plan in plans:
+            _write_planned_image(plan, reading_direction, jpeg_quality, Image, progress_callback, stop_requested)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(
+                    _write_planned_image,
+                    plan,
+                    reading_direction,
+                    jpeg_quality,
+                    Image,
+                    progress_callback,
+                    stop_requested,
+                )
+                for plan in plans
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
+
+    return _VolumeSplitResult(
+        source_dir=source_dir,
+        image_count=len(image_paths),
+        split_image_count=split_count,
+        copied_image_count=copied_count,
+        blank_page_count=blank_count,
+        output_image_count=output_count,
+    )
+
+
+def _plan_source_split(
+    *,
+    image_paths: list[Path],
+    destination_dir: Path,
+    reading_direction: str,
+    min_ratio: float,
+    align_facing_pairs: bool,
+    shift_first_page: bool,
+    Image,
+    stop_requested: Callable[[], bool],
+) -> tuple[list[_ImageSplitPlan], int, int, int, int]:
+    plans: list[_ImageSplitPlan] = []
     split_count = 0
     copied_count = 0
     blank_count = 0
@@ -278,37 +347,69 @@ def _split_one_source(
             should_split = is_spread_size(image.width, image.height, min_ratio=min_ratio)
             if should_split:
                 split_x = image.width // 2
-                left = image.crop((0, 0, split_x, image.height))
-                right = image.crop((split_x, 0, image.width, image.height))
-                halves = (right, left) if reading_direction == "rtl" else (left, right)
+                first_half_size = (
+                    (image.width - split_x, image.height)
+                    if reading_direction == "rtl"
+                    else (split_x, image.height)
+                )
+                blank_path = None
                 if align_facing_pairs and _needs_facing_alignment_blank(output_count, shift_first_page):
                     output_count += 1
                     blank_count += 1
-                    _save_blank_page(halves[0].size, destination_dir / f"{output_count:06d}.jpg", Image, jpeg_quality)
-                for half in halves:
-                    output_count += 1
-                    _save_jpeg(
-                        half,
-                        destination_dir / f"{output_count:06d}.jpg",
-                        Image,
-                        jpeg_quality,
+                    blank_path = destination_dir / f"{output_count:06d}.jpg"
+                output_count += 1
+                first_path = destination_dir / f"{output_count:06d}.jpg"
+                output_count += 1
+                second_path = destination_dir / f"{output_count:06d}.jpg"
+                plans.append(
+                    _ImageSplitPlan(
+                        image_path=image_path,
+                        should_split=True,
+                        split_x=split_x,
+                        blank_path=blank_path,
+                        output_paths=(first_path, second_path),
+                        blank_size=first_half_size,
                     )
+                )
                 split_count += 1
             else:
                 output_count += 1
                 destination = destination_dir / f"{output_count:06d}{image_path.suffix.lower()}"
-                shutil.copy2(image_path, destination)
+                plans.append(
+                    _ImageSplitPlan(
+                        image_path=image_path,
+                        should_split=False,
+                        split_x=0,
+                        blank_path=None,
+                        output_paths=(destination,),
+                    )
+                )
                 copied_count += 1
-        progress_callback(image_path)
+    return plans, split_count, copied_count, blank_count, output_count
 
-    return _VolumeSplitResult(
-        source_dir=source_dir,
-        image_count=len(image_paths),
-        split_image_count=split_count,
-        copied_image_count=copied_count,
-        blank_page_count=blank_count,
-        output_image_count=output_count,
-    )
+
+def _write_planned_image(
+    plan: _ImageSplitPlan,
+    reading_direction: str,
+    jpeg_quality: int,
+    Image,
+    progress_callback: Callable[[Path], None],
+    stop_requested: Callable[[], bool],
+) -> None:
+    if stop_requested():
+        raise RuntimeError("ui.spread.split.cancelled")
+    if plan.blank_path is not None and plan.blank_size is not None:
+        _save_blank_page(plan.blank_size, plan.blank_path, Image, jpeg_quality)
+    if plan.should_split:
+        with Image.open(plan.image_path) as image:
+            left = image.crop((0, 0, plan.split_x, image.height))
+            right = image.crop((plan.split_x, 0, image.width, image.height))
+            halves = (right, left) if reading_direction == "rtl" else (left, right)
+            for half, output_path in zip(halves, plan.output_paths):
+                _save_jpeg(half, output_path, Image, jpeg_quality)
+    else:
+        shutil.copy2(plan.image_path, plan.output_paths[0])
+    progress_callback(plan.image_path)
 
 
 def _needs_facing_alignment_blank(output_count: int, shift_first_page: bool) -> bool:

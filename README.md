@@ -192,8 +192,7 @@ Highlights:
 
 - `--crop-mode off` keeps the full page and preserves margins
 - `--crop-mode smart` trims obvious outer borders conservatively
-- `--crop-mode spread-safe` keeps facing pages visually synchronized
-- `--crop-mode spread-fill` is more aggressive and tries to reduce inner white margins when safe
+- `--crop-mode spread-fill` applies linked facing-page crop and searches for a better target-device fit
 - `--gamma` changes luminance
 - `--preserve-color` keeps color instead of converting toward grayscale output
 - `--jpeg-quality` trades file size against compression artifacts

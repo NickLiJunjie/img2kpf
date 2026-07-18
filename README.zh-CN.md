@@ -190,8 +190,7 @@ python gui_app.py
 
 - `--crop-mode off`：不裁边，完整保留原页边距
 - `--crop-mode smart`：保守裁掉明显外边框
-- `--crop-mode spread-safe`：双页联动，尽量保持左右页一致
-- `--crop-mode spread-fill`：更激进，会在安全前提下尽量减少中缝白边
+- `--crop-mode spread-fill`：双页联动，按目标设备比例寻找更合适的裁边框
 - `--gamma`：改变亮度
 - `--preserve-color`：保留彩色，不往灰度方向收敛
 - `--jpeg-quality`：在文件体积与压缩痕迹之间取舍
