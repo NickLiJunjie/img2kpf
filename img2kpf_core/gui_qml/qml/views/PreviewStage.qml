@@ -27,6 +27,10 @@ SquircleCard {
     property string leftActionText: ""
     property string rightActionText: ""
     property real previewAspectRatio: 0.72
+    property bool coverWatermarkVisible: false
+    property string coverWatermarkText: "Cover"
+    property string coverWatermarkToolTip: ""
+    property string coverWatermarkSide: "left"
 
     signal leftRequested()
     signal rightRequested()
@@ -221,6 +225,38 @@ SquircleCard {
                         cache: false
                         smooth: true
                         mipmap: true
+                    }
+
+                    Rectangle {
+                        id: coverWatermark
+                        visible: root.coverWatermarkVisible
+                        x: Math.min(parent.width - width - 14, root.coverWatermarkSide === "right" ? parent.width / 2 + 14 : 14)
+                        y: 14
+                        width: coverWatermarkLabel.implicitWidth + 24
+                        height: 32
+                        radius: 10
+                        color: theme && theme.dark ? "#802A6DF4" : "#CCEFF6FF"
+                        border.color: theme ? theme.accentPrimary : "#0071E3"
+                        border.width: 1
+                        opacity: 0.78
+
+                        Text {
+                            id: coverWatermarkLabel
+                            anchors.centerIn: parent
+                            text: root.coverWatermarkText
+                            color: theme && theme.dark ? "#FFFFFF" : (theme ? theme.accentPrimary : "#0071E3")
+                            font.pixelSize: 13
+                            font.weight: Font.DemiBold
+                        }
+
+                        HoverHandler {
+                            id: coverWatermarkHover
+                            cursorShape: Qt.PointingHandCursor
+                        }
+
+                        ToolTip.text: root.coverWatermarkToolTip
+                        ToolTip.visible: coverWatermarkHover.hovered && root.coverWatermarkToolTip.length > 0
+                        ToolTip.delay: 360
                     }
                 }
             }

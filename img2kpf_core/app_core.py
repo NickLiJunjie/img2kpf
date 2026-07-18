@@ -137,6 +137,8 @@ class AppRunConfig:
     jpeg_quality_auto: bool = True
     emit_kfx: bool = False
     output_format: str = "kpf"
+    cover_page_number: int | None = None
+    cover_volume_pages: dict[str, int] | None = None
     kfx_plugin: str = DEFAULT_KFX_PLUGIN_ID
     jobs: int = 5
     performance_mode: str = "balanced"
@@ -637,6 +639,7 @@ def _execute_single_run(
             input_dir=input_dir,
             output_path=build_output_path,
             title=config.title.strip() if config.custom_title_enabled and config.title.strip() else None,
+            cover_page_number=config.cover_page_number,
             image_processing=image_processing,
             shift_first_page=config.shift,
             layout_options=layout_options,
@@ -823,6 +826,7 @@ def _execute_batch_run(
                     should_keep_kpf(config),
                     config.kfx_plugin.strip() or None,
                     _resolve_batch_volume_title(config, subdir, index),
+                    _resolve_batch_volume_cover_page(config, subdir),
                     make_volume_progress_callback(subdir),
                     should_stop,
                 )
@@ -884,6 +888,7 @@ def _execute_batch_run(
                     should_keep_kpf(config),
                     config.kfx_plugin.strip() or None,
                     _resolve_batch_volume_title(config, next_subdir, next_index),
+                    _resolve_batch_volume_cover_page(config, next_subdir),
                     make_volume_progress_callback(next_subdir),
                     should_stop,
                 )
@@ -995,6 +1000,7 @@ def _run_one_volume(
     keep_kpf: bool,
     kfx_plugin_ref: str | None,
     title: str | None = None,
+    cover_page_number: int | None = None,
     progress_callback: BuildProgressCallback | None = None,
     stop_requested: Callable[[], bool] | None = None,
 ) -> BuildResult:
@@ -1004,6 +1010,7 @@ def _run_one_volume(
         input_dir=input_dir,
         output_path=build_output_path,
         title=title or input_dir.name,
+        cover_page_number=cover_page_number,
         image_processing=image_processing,
         shift_first_page=shift_first_page,
         layout_options=layout_options,
@@ -1039,6 +1046,17 @@ def _run_one_volume(
             result.output_path = kfx_result.kfx_path
             result.kfx_output_path = None
     return result
+
+
+def _resolve_batch_volume_cover_page(config: AppRunConfig, subdir: Path) -> int | None:
+    overrides = config.cover_volume_pages or {}
+    for key in (str(subdir), subdir.name):
+        value = overrides.get(key)
+        if value is not None:
+            return max(1, int(value))
+    if config.cover_page_number is None:
+        return None
+    return max(1, int(config.cover_page_number))
 
 
 def _resolve_batch_volume_title(config: AppRunConfig, subdir: Path, volume_index: int) -> str:

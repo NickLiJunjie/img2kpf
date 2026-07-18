@@ -3219,6 +3219,7 @@ class PagePlan:
     external_id: str
     aux_id: str
     resource_id: str
+    source_page_number: int | None = None
     is_shift_blank: bool = False
 
 
@@ -3435,6 +3436,7 @@ def build_volume_plan(
                 external_id=external_id,
                 aux_id=aux_id,
                 resource_id=resource_id,
+                source_page_number=None if slot.is_shift_blank else slot.source_index + 1 if slot.source_index is not None else None,
                 is_shift_blank=slot.is_shift_blank,
             )
             pages.append(page_plan)
@@ -3501,7 +3503,15 @@ def prepend_shift_blank(
     return [blank_path, *image_paths], [blank_info, *image_infos], temp_root
 
 
-def resolve_cover_external_id(pages: list[PagePlan]) -> str:
+def resolve_cover_external_id(pages: list[PagePlan], cover_page_number: int | None = None) -> str:
+    if cover_page_number is not None:
+        requested = max(1, int(cover_page_number))
+        for page in pages:
+            if not page.is_shift_blank and page.source_page_number == requested:
+                return page.external_id
+        real_pages = [page for page in pages if not page.is_shift_blank]
+        if real_pages:
+            return real_pages[-1].external_id
     for page in pages:
         if not page.is_shift_blank:
             return page.external_id
@@ -3515,6 +3525,7 @@ def write_book_kdf(
     spreads: list[SpreadPlan],
     pages: list[PagePlan],
     layout_options: LayoutOptions,
+    cover_page_number: int | None = None,
 ) -> bytes:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_path.exists():
@@ -3566,7 +3577,7 @@ def write_book_kdf(
 
         section_ids = [spread.section_id for spread in spreads]
         page_aux_ids = [page.aux_id for page in pages]
-        cover_external_id = resolve_cover_external_id(pages)
+        cover_external_id = resolve_cover_external_id(pages, cover_page_number)
 
         insert_fragment(
             "book_metadata",
@@ -3739,6 +3750,7 @@ def build_kpf(
     input_dir: Path,
     output_path: Path,
     title: str | None,
+    cover_page_number: int | None = None,
     image_processing: ImageProcessingOptions | None = None,
     shift_first_page: bool = False,
     layout_options: LayoutOptions | None = None,
@@ -3830,6 +3842,7 @@ def build_kpf(
             spreads=spreads,
             pages=pages,
             layout_options=effective_layout,
+            cover_page_number=cover_page_number,
         )
         raise_if_build_cancelled(stop_requested)
         manifest_bytes = effective_template_assets.manifest_bytes or build_manifest()
@@ -3958,6 +3971,7 @@ def build_batch(
     image_processing: ImageProcessingOptions | None,
     shift_first_page: bool,
     layout_options: LayoutOptions | None = None,
+    cover_page_number: int | None = None,
     emit_kfx: bool = False,
     kfx_plugin_ref: str = DEFAULT_KFX_PLUGIN_ID,
     jobs: int = 1,
@@ -3985,6 +3999,7 @@ def build_batch(
                     input_dir=subdir,
                     output_path=output_path,
                     title=subdir.name,
+                    cover_page_number=cover_page_number,
                     image_processing=image_processing,
                     shift_first_page=shift_first_page,
                     layout_options=layout_options,
@@ -4025,6 +4040,7 @@ def build_batch(
                 worker_image_processing,
                 shift_first_page,
                 layout_options,
+                cover_page_number,
                 emit_kfx,
                 kfx_plugin_ref,
             ): subdir
@@ -4054,6 +4070,7 @@ def _build_batch_volume_worker(
     image_processing: ImageProcessingOptions | None,
     shift_first_page: bool,
     layout_options: LayoutOptions | None,
+    cover_page_number: int | None,
     emit_kfx: bool,
     kfx_plugin_ref: str,
 ) -> BuildResult:
@@ -4062,6 +4079,7 @@ def _build_batch_volume_worker(
         input_dir=input_dir,
         output_path=output_path,
         title=input_dir.name,
+        cover_page_number=cover_page_number,
         image_processing=image_processing,
         shift_first_page=shift_first_page,
         layout_options=layout_options,
@@ -4113,6 +4131,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="插件 ID、插件目录或 zip 路径；默认使用 `img2kpf_core/plugins/kfx_output`。",
     )
     parser.add_argument("--title", type=str, help="单卷模式可选标题，默认使用输入文件夹名")
+    parser.add_argument(
+        "--cover-page",
+        type=int,
+        default=None,
+        help="指定封面图片页码，按输入图片排序后的真实页码计算；默认自动使用第一张真实图片。",
+    )
     parser.add_argument(
         "--shift",
         action="store_true",
@@ -4250,6 +4274,7 @@ def main() -> None:
             input_dir=args.input,
             output_path=args.output,
             title=args.title,
+            cover_page_number=args.cover_page,
             image_processing=image_processing,
             shift_first_page=args.shift,
             layout_options=layout_options,
@@ -4273,6 +4298,7 @@ def main() -> None:
         image_processing=image_processing,
         shift_first_page=args.shift,
         layout_options=layout_options,
+        cover_page_number=args.cover_page,
         emit_kfx=args.emit_kfx,
         kfx_plugin_ref=args.kfx_plugin,
         jobs=args.jobs,

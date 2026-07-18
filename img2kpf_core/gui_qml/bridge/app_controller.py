@@ -25,7 +25,7 @@ from ...app_core import (
     validate_run_config,
 )
 from ...i18n import decode_i18n_message, encode_i18n_message, resolve_language
-from ...kpf_generator import normalize_crop_mode, resolve_parallel_jobs
+from ...kpf_generator import build_layout_page_groups, normalize_crop_mode, resolve_parallel_jobs
 from ...plugin_registry import (
     DEFAULT_KFX_PLUGIN_ID,
     install_kfx_plugin_archive,
@@ -41,6 +41,8 @@ from ...gui.models import (
     JOBS_DEFAULT,
     JOBS_MAX,
     JOBS_MIN,
+    COVER_BATCH_SCOPE_OPTIONS,
+    COVER_MODE_OPTIONS,
     OUTPUT_FORMAT_OPTIONS,
     PANEL_MOVEMENT_OPTIONS,
     PAGE_LAYOUT_OPTIONS,
@@ -221,6 +223,64 @@ class AppController(QObject):
     def volumeTitleTemplateVisible(self) -> bool:
         detection = self._last_detection
         return self._state.custom_title_enabled and detection is not None and detection.mode == "batch"
+
+    @Property(str, notify=stateChanged)
+    def coverMode(self) -> str:
+        return self._state.cover_mode
+
+    @Property(int, notify=stateChanged)
+    def coverPageNumber(self) -> int:
+        return self._state.cover_page_number
+
+    @Property(str, notify=stateChanged)
+    def coverBatchScope(self) -> str:
+        return self._state.cover_batch_scope
+
+    @Property(bool, notify=stateChanged)
+    def coverWatermarkEnabled(self) -> bool:
+        return self._state.cover_watermark_enabled
+
+    @Property(bool, notify=stateChanged)
+    def coverBatchScopeVisible(self) -> bool:
+        detection = self._last_detection
+        return self._state.cover_mode == "page" and detection is not None and detection.mode == "batch"
+
+    @Property(bool, notify=stateChanged)
+    def coverPerVolumeVisible(self) -> bool:
+        return self.coverBatchScopeVisible and self._state.cover_batch_scope == "per_volume"
+
+    @Property(int, notify=stateChanged)
+    def currentVolumeCoverPageNumber(self) -> int:
+        return self._cover_page_for_source(self._resolve_preview_source_dir())
+
+    @Property(str, notify=stateChanged)
+    def coverEffectSummary(self) -> str:
+        if self._state.cover_mode != "page":
+            return self._tr("ui.cover.effect.auto")
+        page = self._cover_page_for_source(self._resolve_preview_source_dir())
+        detection = self._last_detection
+        if detection is not None and detection.mode == "batch" and self._state.cover_batch_scope == "per_volume":
+            return self._tr(encode_i18n_message("ui.cover.effect.current.volume", page=page))
+        return self._tr(encode_i18n_message("ui.cover.effect.page", page=page))
+
+    @Property(bool, notify=stateChanged)
+    def previewIsCoverPage(self) -> bool:
+        return self._state.cover_watermark_enabled and self._current_preview_cover_slot() is not None
+
+    @Property(str, notify=stateChanged)
+    def coverWatermarkSide(self) -> str:
+        slot = self._current_preview_cover_slot()
+        if slot is None:
+            return "left"
+        return self._visual_side_for_page_position(slot.page_position)
+
+    @Property(str, notify=stateChanged)
+    def coverWatermarkText(self) -> str:
+        return self._tr("ui.cover.watermark")
+
+    @Property(str, notify=stateChanged)
+    def coverWatermarkToolTip(self) -> str:
+        return self._tr("ui.cover.watermark.tooltip")
 
     @Property(str, notify=stateChanged)
     def titleEffectSummary(self) -> str:
@@ -787,6 +847,14 @@ class AppController(QObject):
         return self._options(PERFORMANCE_MODE_OPTIONS)
 
     @Property("QVariantList", notify=stateChanged)
+    def coverModeOptions(self) -> list[dict[str, str]]:
+        return self._options(COVER_MODE_OPTIONS)
+
+    @Property("QVariantList", notify=stateChanged)
+    def coverBatchScopeOptions(self) -> list[dict[str, str]]:
+        return self._options(COVER_BATCH_SCOPE_OPTIONS)
+
+    @Property("QVariantList", notify=stateChanged)
     def triStateOptions(self) -> list[dict[str, str]]:
         return self._options(TRI_STATE_OPTIONS)
 
@@ -840,6 +908,7 @@ class AppController(QObject):
         self._state.title = ""
         self._state.custom_title_enabled = False
         self._state.volume_title_template = GuiState().volume_title_template
+        self._state.cover_volume_pages = {}
         self._preview_anchor_page_number = None
         self._preview_selected_source_dir = None
         self._detect_input()
@@ -855,6 +924,75 @@ class AppController(QObject):
             return
         self._state.output_location = normalized
         self._mark_output_affecting_change()
+        self._save()
+        self.stateChanged.emit()
+
+    @Slot(str)
+    def setCoverMode(self, value: str) -> None:
+        normalized = value if value in {"auto", "page"} else "auto"
+        if self._state.cover_mode == normalized:
+            return
+        self._state.cover_mode = normalized
+        self._mark_output_affecting_change()
+        self._save()
+        self.stateChanged.emit()
+
+    @Slot(int)
+    def setCoverPageNumber(self, value: int) -> None:
+        normalized = self._normalize_cover_page_number(value)
+        if self._state.cover_page_number == normalized:
+            return
+        self._state.cover_page_number = normalized
+        self._mark_output_affecting_change()
+        self._save()
+        self.stateChanged.emit()
+
+    @Slot(str)
+    def setCoverPageNumberText(self, value: str) -> None:
+        try:
+            number = int(str(value).strip())
+        except ValueError:
+            number = self._state.cover_page_number
+        self.setCoverPageNumber(number)
+
+    @Slot(str)
+    def setCoverBatchScope(self, value: str) -> None:
+        normalized = value if value in {"uniform", "per_volume"} else "uniform"
+        if self._state.cover_batch_scope == normalized:
+            return
+        self._state.cover_batch_scope = normalized
+        self._mark_output_affecting_change()
+        self._save()
+        self.stateChanged.emit()
+
+    @Slot(int)
+    def setCurrentVolumeCoverPageNumber(self, value: int) -> None:
+        source_dir = self._resolve_preview_source_dir()
+        if source_dir is None:
+            return
+        normalized = self._normalize_cover_page_number(value, source_dir)
+        key = str(source_dir)
+        if self._state.cover_volume_pages.get(key) == normalized:
+            return
+        self._state.cover_volume_pages[key] = normalized
+        self._mark_output_affecting_change()
+        self._save()
+        self.stateChanged.emit()
+
+    @Slot(str)
+    def setCurrentVolumeCoverPageNumberText(self, value: str) -> None:
+        try:
+            number = int(str(value).strip())
+        except ValueError:
+            number = self.currentVolumeCoverPageNumber
+        self.setCurrentVolumeCoverPageNumber(number)
+
+    @Slot(bool)
+    def setCoverWatermarkEnabled(self, value: bool) -> None:
+        enabled = bool(value)
+        if self._state.cover_watermark_enabled == enabled:
+            return
+        self._state.cover_watermark_enabled = enabled
         self._save()
         self.stateChanged.emit()
 
@@ -1401,6 +1539,7 @@ class AppController(QObject):
         self._state.title = ""
         self._state.custom_title_enabled = False
         self._state.volume_title_template = GuiState().volume_title_template
+        self._state.cover_volume_pages = {}
         self._preview_anchor_page_number = None
         self._preview_selected_source_dir = None
         self._last_output_location = ""
@@ -1413,6 +1552,15 @@ class AppController(QObject):
     @Slot()
     def togglePreviewCropBoxes(self) -> None:
         self._preview_show_crop_boxes = not self._preview_show_crop_boxes
+        self._schedule_preview_refresh(immediate=True)
+        self.stateChanged.emit()
+
+    @Slot()
+    def jumpToCoverPage(self) -> None:
+        page_number = self._cover_page_for_source(self._resolve_preview_source_dir())
+        if page_number <= 0:
+            return
+        self._preview_anchor_page_number = page_number
         self._schedule_preview_refresh(immediate=True)
         self.stateChanged.emit()
 
@@ -1629,6 +1777,8 @@ class AppController(QObject):
             jpeg_quality_auto=self._state.jpeg_quality_auto,
             emit_kfx=self._state.output_format in {"kpf_kfx", "kfx_only"},
             output_format=self._state.output_format,
+            cover_page_number=self._cover_page_for_run(),
+            cover_volume_pages=self._cover_volume_pages_for_run(),
             kfx_plugin=self._state.kfx_plugin,
             jobs=self._auto_jobs_for_current_input(),
             performance_mode=self._state.performance_mode,
@@ -1733,6 +1883,99 @@ class AppController(QObject):
         if mode == "single":
             return (getattr(detection, "input_dir"),)
         return tuple()
+
+    def _normalize_cover_page_number(self, value: int, source_dir: Path | None = None) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = 1
+        total_pages = self._source_page_count(source_dir)
+        if total_pages > 0:
+            return max(1, min(number, total_pages))
+        return max(1, number)
+
+    def _source_page_count(self, source_dir: Path | None = None) -> int:
+        source = source_dir or self._resolve_preview_source_dir()
+        if source is None:
+            detection = self._last_detection
+            if detection is not None and detection.mode == "single":
+                return len(detection.root_images)
+            return 0
+        try:
+            from ...kpf_generator import find_input_images
+
+            return len(find_input_images(source))
+        except Exception:
+            return 0
+
+    def _cover_page_for_source(self, source_dir: Path | None) -> int:
+        if source_dir is None:
+            return self._normalize_cover_page_number(self._state.cover_page_number)
+        if self._state.cover_mode != "page":
+            return 1
+        if self._state.cover_batch_scope == "per_volume":
+            value = self._state.cover_volume_pages.get(str(source_dir))
+            if value is None:
+                value = self._state.cover_volume_pages.get(source_dir.name)
+            if value is not None:
+                return self._normalize_cover_page_number(value, source_dir)
+        return self._normalize_cover_page_number(self._state.cover_page_number, source_dir)
+
+    def _cover_page_for_run(self) -> int | None:
+        if self._state.cover_mode != "page":
+            return None
+        return self._normalize_cover_page_number(self._state.cover_page_number)
+
+    def _cover_volume_pages_for_run(self) -> dict[str, int] | None:
+        detection = self._last_detection
+        if (
+            self._state.cover_mode != "page"
+            or self._state.cover_batch_scope != "per_volume"
+            or detection is None
+            or detection.mode != "batch"
+        ):
+            return None
+        overrides: dict[str, int] = {}
+        for source_dir in detection.image_subdirs:
+            key = str(source_dir)
+            value = self._state.cover_volume_pages.get(key)
+            if value is not None:
+                overrides[key] = self._normalize_cover_page_number(value, source_dir)
+        return overrides
+
+    def _current_preview_cover_slot(self):
+        if self._preview_current_page_number <= 0:
+            return None
+        source_dir = self._resolve_preview_source_dir()
+        cover_page = self._cover_page_for_source(source_dir)
+        if cover_page <= 0:
+            return None
+        total_pages = self._source_page_count(source_dir)
+        if total_pages <= 0:
+            return None
+        try:
+            groups = build_layout_page_groups(
+                total_pages,
+                shift_blank_count=1 if self._state.shift else 0,
+                page_layout=self._state.page_layout,
+            )
+        except ValueError:
+            return None
+        for group in groups:
+            source_pages = tuple(slot.source_index + 1 for slot in group if slot.source_index is not None)
+            if not source_pages or min(source_pages) != self._preview_current_page_number:
+                continue
+            for slot in group:
+                if slot.source_index is not None and slot.source_index + 1 == cover_page:
+                    return slot
+        return None
+
+    def _visual_side_for_page_position(self, page_position: str) -> str:
+        if self._state.page_layout != "facing":
+            return "left"
+        if self._state.reading_direction == "rtl":
+            return "right" if page_position == "first" else "left"
+        return "left" if page_position == "first" else "right"
 
     def _schedule_preview_refresh(self, immediate: bool = False) -> None:
         if self._resolve_preview_source_dir() is not None:

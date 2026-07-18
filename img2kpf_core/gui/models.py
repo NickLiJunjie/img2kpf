@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 TriStateValue = Literal["auto", "enabled", "disabled"]
@@ -78,6 +78,16 @@ OUTPUT_FORMAT_OPTIONS = (
     ("kpf_kfx", "KPF + KFX"),
 )
 
+COVER_MODE_OPTIONS = (
+    ("auto", "ui.cover.mode.auto"),
+    ("page", "ui.cover.mode.page"),
+)
+
+COVER_BATCH_SCOPE_OPTIONS = (
+    ("uniform", "ui.cover.scope.uniform"),
+    ("per_volume", "ui.cover.scope.per.volume"),
+)
+
 @dataclass
 class GuiState:
     input_dir: str = ""
@@ -114,6 +124,11 @@ class GuiState:
     emit_kfx: bool = False
     shift_mode: str = "off"
     output_format: str = "kpf"
+    cover_mode: str = "auto"
+    cover_page_number: int = 1
+    cover_batch_scope: str = "uniform"
+    cover_volume_pages: dict[str, int] = field(default_factory=dict)
+    cover_watermark_enabled: bool = True
     kfx_plugin: str = ""
     jobs: int = JOBS_DEFAULT
     performance_mode: str = "balanced"

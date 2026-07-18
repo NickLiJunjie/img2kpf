@@ -1058,6 +1058,127 @@ ApplicationWindow {
                                     onEditingFinished: controller.setVolumeTitleTemplate(text)
                                 }
                             }
+
+                            FieldCard {
+                                Layout.fillWidth: true
+                                theme: theme
+                                motion: motion
+                                label: window.uiText("ui.cover.settings")
+                                metaText: window.value("coverEffectSummary", "")
+
+                                OptionRow {
+                                    Layout.fillWidth: true
+                                    theme: theme
+                                    motion: motion
+                                    labelWidth: window.inspectorLabelWidth
+                                    label: window.uiText("ui.cover.source")
+                                    options: window.value("coverModeOptions", [])
+                                    value: window.value("coverMode", "auto")
+                                    onSelected: value => controller.setCoverMode(value)
+                                }
+
+                                OptionRow {
+                                    Layout.fillWidth: true
+                                    visible: window.value("coverBatchScopeVisible", false)
+                                    theme: theme
+                                    motion: motion
+                                    labelWidth: window.inspectorLabelWidth
+                                    label: window.uiText("ui.cover.batch.scope")
+                                    options: window.value("coverBatchScopeOptions", [])
+                                    value: window.value("coverBatchScope", "uniform")
+                                    onSelected: value => controller.setCoverBatchScope(value)
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    visible: window.value("coverMode", "auto") === "page"
+                                    spacing: theme.space8
+
+                                    Text {
+                                        Layout.preferredWidth: window.inspectorLabelWidth
+                                        text: window.value("coverPerVolumeVisible", false) ? window.uiText("ui.cover.current.volume.page") : window.uiText("ui.cover.page")
+                                        color: theme.textSecondary
+                                        font.pixelSize: 13
+                                        font.weight: Font.Medium
+                                        horizontalAlignment: Text.AlignRight
+                                        verticalAlignment: Text.AlignVCenter
+                                        elide: Text.ElideRight
+                                    }
+
+                                    TextEntry {
+                                        id: coverPageField
+                                        Layout.fillWidth: true
+                                        theme: theme
+                                        motion: motion
+                                        text: window.value("coverPerVolumeVisible", false) ? String(window.value("currentVolumeCoverPageNumber", 1)) : String(window.value("coverPageNumber", 1))
+                                        inputMethodHints: Qt.ImhDigitsOnly
+                                        horizontalAlignment: TextInput.AlignHCenter
+                                        validator: IntValidator {
+                                            bottom: 1
+                                            top: Math.max(1, window.value("previewTotalPages", 9999))
+                                        }
+                                        onEditingFinished: {
+                                            if (window.value("coverPerVolumeVisible", false))
+                                                controller.setCurrentVolumeCoverPageNumberText(text)
+                                            else
+                                                controller.setCoverPageNumberText(text)
+                                        }
+                                        onAccepted: {
+                                            if (window.value("coverPerVolumeVisible", false))
+                                                controller.setCurrentVolumeCoverPageNumberText(text)
+                                            else
+                                                controller.setCoverPageNumberText(text)
+                                        }
+                                    }
+
+                                    PrimaryButton {
+                                        theme: theme
+                                        motion: motion
+                                        prominent: false
+                                        text: window.uiText("ui.cover.jump")
+                                        enabled: window.value("previewTotalPages", 0) > 0
+                                        onClicked: controller.jumpToCoverPage()
+                                    }
+                                }
+
+                                CheckBox {
+                                    id: coverWatermarkCheck
+                                    Layout.fillWidth: true
+                                    text: window.uiText("ui.cover.show.watermark")
+                                    checked: window.value("coverWatermarkEnabled", true)
+                                    spacing: 8
+                                    onToggled: controller.setCoverWatermarkEnabled(checked)
+
+                                    indicator: Rectangle {
+                                        x: coverWatermarkCheck.leftPadding
+                                        y: parent.height / 2 - height / 2
+                                        width: 18
+                                        height: 18
+                                        radius: 5
+                                        color: coverWatermarkCheck.checked ? theme.accentPrimary : theme.surfaceBase
+                                        border.color: coverWatermarkCheck.checked ? theme.accentPrimary : theme.lineSubtle
+                                        border.width: 1
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            visible: coverWatermarkCheck.checked
+                                            text: "✓"
+                                            color: "#FFFFFF"
+                                            font.pixelSize: 13
+                                            font.weight: Font.DemiBold
+                                        }
+                                    }
+
+                                    contentItem: Text {
+                                        text: coverWatermarkCheck.text
+                                        color: theme.textPrimary
+                                        font.pixelSize: 13
+                                        font.weight: Font.DemiBold
+                                        verticalAlignment: Text.AlignVCenter
+                                        leftPadding: coverWatermarkCheck.indicator.width + coverWatermarkCheck.spacing
+                                    }
+                                }
+                            }
                         }
 
                         CollapsibleSection {
@@ -1963,6 +2084,10 @@ ApplicationWindow {
                 leftActionText: window.value("previewLeftActionText", "")
                 rightActionText: window.value("previewRightActionText", "")
                 previewAspectRatio: window.value("previewAspectRatio", 0.72)
+                coverWatermarkVisible: window.value("previewIsCoverPage", false)
+                coverWatermarkText: window.value("coverWatermarkText", "")
+                coverWatermarkToolTip: window.value("coverWatermarkToolTip", "")
+                coverWatermarkSide: window.value("coverWatermarkSide", "left")
                 onLeftRequested: controller.leftPreviewPage()
                 onRightRequested: controller.rightPreviewPage()
                 onPageJumpRequested: pageNumber => controller.jumpPreviewPage(pageNumber)

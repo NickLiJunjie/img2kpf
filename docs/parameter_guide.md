@@ -42,6 +42,12 @@ Use it together with:
 - Purpose: optional title metadata for single-volume mode
 - Image impact: none
 
+### `--cover-page INT`
+
+- Purpose: choose which real source image should be used as the cover; omitted means the first real image
+- Image impact: the cover uses the current cropped and processed page result
+- Note: when `--shift` is enabled, the inserted blank page is not counted as a real source page
+
 ### `--jobs INT`
 
 - Purpose: number of parallel tasks in batch mode

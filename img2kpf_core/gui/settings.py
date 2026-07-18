@@ -176,5 +176,25 @@ class GuiSettingsStore:
         valid_performance_modes = {value for value, _ in PERFORMANCE_MODE_OPTIONS}
         if state.performance_mode not in valid_performance_modes:
             state.performance_mode = "balanced"
+        if state.cover_mode not in {"auto", "page"}:
+            state.cover_mode = "auto"
+        if state.cover_batch_scope not in {"uniform", "per_volume"}:
+            state.cover_batch_scope = "uniform"
+        try:
+            state.cover_page_number = max(1, int(state.cover_page_number))
+        except (TypeError, ValueError):
+            state.cover_page_number = 1
+        if not isinstance(state.cover_volume_pages, dict):
+            state.cover_volume_pages = {}
+        else:
+            normalized_pages: dict[str, int] = {}
+            for key, value in state.cover_volume_pages.items():
+                if not isinstance(key, str):
+                    continue
+                try:
+                    normalized_pages[key] = max(1, int(value))
+                except (TypeError, ValueError):
+                    continue
+            state.cover_volume_pages = normalized_pages
         state.jobs = max(JOBS_MIN, min(int(state.jobs), JOBS_MAX))
         return state
